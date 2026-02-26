@@ -321,8 +321,8 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount) {
   return (
     `${header}\n` +
     `${emojiRow}\n\n` +
-    `➡️ Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
-    `⬅️ Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
+    `🔴 Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
+    `🟢 Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
     `👤 <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | <a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
     priceLine +
     mcapLine +
