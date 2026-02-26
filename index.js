@@ -41,7 +41,7 @@ function defaultSettings() {
   return {
     gif: null,         // { fileId, type: 'photo'|'animation' } or null
     minBuyUsd: 0,      // minimum buy in USD to trigger alert (0 = all)
-    emoji: '🟢',       // emoji shown in alert header
+    emoji: '🐕',       // emoji shown in alert header
     stepUsd: 0,        // step size in USD (stored, future use)
     showPrice: false,  // show token price per unit in alert
     ignoreMev: true,   // skip txs where feePayer !== token receiver
@@ -144,7 +144,7 @@ async function tgRequest(method, body) {
 function buildSettingsText(sub) {
   const name = sub.settings.tokenName || sub.tokenMint.slice(0, 8) + '...';
   return (
-    `⚙️ <b>Settings for ${name}</b>\n\n` +
+    `🐕 <b>Inu Buy Bot — ${name}</b>\n\n` +
     `Token: <code>${sub.tokenMint}</code>\n` +
     `Group: <code>${sub.chatId}</code>`
   );
@@ -222,8 +222,8 @@ function buildAlertMessage(sub, tx, swap, tokenOut) {
   const name = s.tokenName || sub.tokenMint.slice(0, 6) + '...';
 
   const header = isWhale
-    ? `🐋 <b>WHALE BUY!</b>\n\n`
-    : `${s.emoji} <b>New Buy!</b>\n\n`;
+    ? `🐋🐕 <b>WHALE BUY! WOOF WOOF!</b>\n\n`
+    : `${s.emoji} <b>Someone just aped in!</b>\n\n`;
 
   let priceInfo = '';
   if (s.showPrice && tokenAmount > 0 && usdValue > 0) {
@@ -237,8 +237,8 @@ function buildAlertMessage(sub, tx, swap, tokenOut) {
 
   return (
     header +
-    `💰 <b>Spent:</b> ${solSpent.toFixed(4)} SOL${usdValue > 0 ? ` (~$${usdValue.toFixed(2)})` : ''}\n` +
-    `📦 <b>Got:</b> ${tokenAmount.toLocaleString()} ${name}\n` +
+    `🦴 <b>Spent:</b> ${solSpent.toFixed(4)} SOL${usdValue > 0 ? ` (~$${usdValue.toFixed(2)})` : ''}\n` +
+    `🐾 <b>Got:</b> ${tokenAmount.toLocaleString()} ${name}\n` +
     priceInfo +
     `👤 <b>Buyer:</b> <code>${shortBuyer}</code>\n` +
     `🔗 <a href="https://solscan.io/tx/${tx.signature}">View on Solscan</a>`
@@ -257,10 +257,14 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
 
   // Alert inline buttons (chart + optional TG link)
   const alertButtons = [];
-  if (s.linkTg) alertButtons.push({ text: '💬 Telegram', url: s.linkTg });
+  if (s.linkTg) alertButtons.push({ text: '🐕 Telegram', url: s.linkTg });
   alertButtons.push({
     text: '📈 Chart',
     url: `https://dexscreener.com/solana/${sub.tokenMint}`,
+  });
+  alertButtons.push({
+    text: '🛒 Buy',
+    url: `https://jup.ag/swap/SOL-${sub.tokenMint}`,
   });
   const reply_markup = { inline_keyboard: [alertButtons] };
 
@@ -313,7 +317,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     userStates.set(userId, { step: 'awaiting_chain', groupChatId });
     await tgRequest('sendMessage', {
       chat_id: dmChatId,
-      text: '🔧 <b>Buy Bot Setup</b>\n\nPlease select the chain of your token:',
+      text: '🐕 <b>Inu Buy Bot Setup</b>\n\nGM! Please select the chain of your token:',
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
@@ -325,8 +329,8 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
     await tgRequest('sendMessage', {
       chat_id: dmChatId,
       text:
-        '👋 <b>Solana Buy Alert Bot</b>\n\n' +
-        'Add me to your group and type /add to set up buy alerts.\n\n' +
+        '🐕 <b>Inu Buy Bot</b>\n\n' +
+        'Woof! Add me to your group and type /add to set up real-time buy alerts.\n\n' +
         '<b>Commands:</b>\n' +
         '/add — Set up buy alerts (use in your group)\n' +
         '/settings — Manage settings (use in DM)',
@@ -348,9 +352,10 @@ bot.onText(/\/add(?:@\w+)?/, async (msg) => {
   const link = `https://t.me/${botUsername}?start=setup_${groupChatId}`;
   await tgRequest('sendMessage', {
     chat_id: groupChatId,
-    text: '🔧 Click the button below to add your token for buy alerts',
+    text: '🐕 <b>Inu Buy Bot</b>\n\nClick below to add your token for buy alerts!',
+    parse_mode: 'HTML',
     reply_markup: {
-      inline_keyboard: [[{ text: '➡️ Add Token', url: link }]],
+      inline_keyboard: [[{ text: '🐾 Add Token', url: link }]],
     },
   });
 });
@@ -399,7 +404,7 @@ bot.on('callback_query', async (query) => {
     await tgRequest('editMessageText', {
       chat_id: dmChatId,
       message_id: msgId,
-      text: '⚙️ <b>Send the token address to track [SOL]</b>',
+      text: '🐾 <b>Send the token address to track [SOL]</b>\n\nPaste the contract address below:',
       parse_mode: 'HTML',
     });
     return;
