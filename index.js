@@ -224,6 +224,9 @@ function buildSettingsKeyboard(sub) {
       [
         { text: s.whaleUsd > 0 ? `🐋 Whale Alert $${s.whaleUsd} ✅` : '🐋 Whale Alerts', callback_data: `set_whale:${c}` },
       ],
+      [
+        { text: '🗑️ Remove Token', callback_data: `set_remove:${c}` },
+      ],
     ],
   };
 }
@@ -611,7 +614,49 @@ bot.on('callback_query', async (query) => {
           parse_mode: 'HTML',
         });
         break;
+
+      case 'remove':
+        await tgRequest('editMessageText', {
+          chat_id: dmChatId,
+          message_id: msgId,
+          text:
+            `🗑️ <b>Remove Token</b>\n\n` +
+            `Are you sure you want to remove <b>${sub.settings.tokenName || sub.tokenMint.slice(0, 8) + '...'}</b> and stop all alerts for this group?`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '✅ Yes, remove it', callback_data: `confirm_remove:${groupChatId}` },
+              { text: '❌ Cancel',         callback_data: `back_settings:${groupChatId}` },
+            ]],
+          },
+        });
+        break;
     }
+  }
+
+  // ── Confirm remove ──
+  if (data.startsWith('confirm_remove:')) {
+    const groupChatId = data.slice(15);
+    await tgRequest('answerCallbackQuery', { callback_query_id: query.id });
+    const storage = loadStorage();
+    storage.subscriptions = storage.subscriptions.filter((s) => s.chatId !== groupChatId);
+    saveStorage(storage);
+    try { await syncHeliusWebhook(); } catch (e) { console.error('Helius sync error:', e.message); }
+    await tgRequest('editMessageText', {
+      chat_id: dmChatId,
+      message_id: msgId,
+      text: '✅ Token removed. Alerts for this group have been stopped.\n\nUse /add in the group to set up a new token.',
+    });
+    return;
+  }
+
+  // ── Back to settings ──
+  if (data.startsWith('back_settings:')) {
+    const groupChatId = data.slice(14);
+    await tgRequest('answerCallbackQuery', { callback_query_id: query.id });
+    const sub = findSub(groupChatId);
+    if (sub) await refreshSettings(dmChatId, msgId, sub);
+    return;
   }
 });
 
