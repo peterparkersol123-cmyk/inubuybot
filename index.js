@@ -45,7 +45,7 @@ function defaultSettings() {
     stepUsd: 0,        // step size in USD (stored, future use)
     showPrice: false,  // show token price per unit in alert
     ignoreMev: true,   // skip txs where feePayer !== token receiver
-    whaleUsd: 0,       // whale alert threshold in USD (0 = off)
+    whaleUsd: 50000,   // whale alert threshold in USD (0 = off)
     linkTg: '',        // project Telegram link shown as button in alert
     circSupply: 0,     // circulating supply for market cap calc
     tokenName: '',     // token symbol fetched from Helius metadata
