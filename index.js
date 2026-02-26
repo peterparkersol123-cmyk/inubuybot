@@ -56,12 +56,11 @@ function defaultSettings() {
 let solPriceUsd = 0;
 async function updateSolPrice() {
   try {
-    const res = await fetch(
-      'https://price.jup.ag/v6/price?ids=So11111111111111111111111111111111111111112'
-    );
+    const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
     const data = await res.json();
-    solPriceUsd =
-      data.data?.['So11111111111111111111111111111111111111112']?.price ?? 0;
+    const price = parseFloat(data.price);
+    if (price > 0) solPriceUsd = price;
+    console.log(`SOL price updated: $${solPriceUsd}`);
   } catch (e) {
     console.error('SOL price fetch failed:', e.message);
   }
@@ -295,12 +294,15 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount) {
     ? `🏠 Holders: <b>${holderCount.toLocaleString()}</b>\n`
     : '';
 
+  const chartUrl = `https://dexscreener.com/solana/${sub.tokenMint}`;
+  const buyUrl   = `https://jup.ag/swap/SOL-${sub.tokenMint}`;
+
   return (
     `${header}\n` +
     `${emojiRow}\n\n` +
     `➡️ Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
     `⬅️ Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
-    `👤 <a href="https://solscan.io/account/${buyer}">Buyer</a> / <a href="https://solscan.io/tx/${tx.signature}">Txn</a>\n` +
+    `👤 <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | <a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
     priceLine +
     mcapLine +
     holderLine
@@ -319,18 +321,6 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
   const holderCount = await getHolderCount(sub.tokenMint);
   const message = buildAlertMessage(sub, tx, swap, tokenOut, holderCount);
 
-  // Alert inline buttons (chart + optional TG link)
-  const alertButtons = [];
-  alertButtons.push({
-    text: '📈 Chart',
-    url: `https://dexscreener.com/solana/${sub.tokenMint}`,
-  });
-  alertButtons.push({
-    text: '🛒 Buy',
-    url: `https://jup.ag/swap/SOL-${sub.tokenMint}`,
-  });
-  const reply_markup = { inline_keyboard: [alertButtons] };
-
   if (s.gif) {
     const method = s.gif.type === 'animation' ? 'sendAnimation' : 'sendPhoto';
     const mediaKey = s.gif.type === 'animation' ? 'animation' : 'photo';
@@ -339,7 +329,6 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
       [mediaKey]: s.gif.fileId,
       caption: message,
       parse_mode: 'HTML',
-      reply_markup,
     });
   } else {
     await tgRequest('sendMessage', {
@@ -347,7 +336,6 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
       text: message,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-      reply_markup,
     });
   }
 }
