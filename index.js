@@ -199,9 +199,9 @@ async function tgRequest(method, body) {
 function buildSettingsText(sub) {
   const name = sub.settings.tokenName || sub.tokenMint.slice(0, 8) + '...';
   return (
-    `🐕 <b>Inu Buy Bot — ${name}</b>\n\n` +
-    `Token: <code>${sub.tokenMint}</code>\n` +
-    `Group: <code>${sub.chatId}</code>`
+    `🐕🦴 <b>Inu Buy Bot — ${name}</b> 🦴🐕\n\n` +
+    `🪙 Token: <code>${sub.tokenMint}</code>\n` +
+    `🏠 Group: <code>${sub.chatId}</code>`
   );
 }
 
@@ -211,29 +211,24 @@ function buildSettingsKeyboard(sub) {
   return {
     inline_keyboard: [
       [
-        { text: s.gif ? '✅ Gif / Media' : '❌ Gif / Media',       callback_data: `set_gif:${c}` },
-        { text: `Min Buy $${s.minBuyUsd}`,                          callback_data: `set_minbuy:${c}` },
+        { text: s.gif ? '✅ Gif / Media' : '❌ Gif / Media',                        callback_data: `set_gif:${c}` },
+        { text: `🦴 Min Buy $${s.minBuyUsd}`,                                        callback_data: `set_minbuy:${c}` },
       ],
       [
-        { text: `${s.emoji} Emoji`,                                 callback_data: `set_emoji:${c}` },
-        { text: `Step $${s.stepUsd}`,                               callback_data: `set_step:${c}` },
+        { text: `${s.emoji} Emoji`,                                                  callback_data: `set_emoji:${c}` },
+        { text: `🐾 Step $${s.stepUsd}`,                                             callback_data: `set_step:${c}` },
       ],
       [
-        { text: s.showPrice ? '✅ Show Price' : '✗ Show Price',     callback_data: `set_price:${c}` },
-        { text: s.ignoreMev ? '✅ Ignore MEVs' : '✗ Ignore MEVs',  callback_data: `set_mev:${c}` },
+        { text: s.showPrice ? '✅ Show Price' : '✗ Show Price',                      callback_data: `set_price:${c}` },
+        { text: s.ignoreMev ? '✅ Ignore MEVs' : '✗ Ignore MEVs',                   callback_data: `set_mev:${c}` },
       ],
       [
-        { text: '🔜 Trending Alerts',                               callback_data: `set_trending:${c}` },
-        { text: s.whaleUsd > 0 ? `✅ Whale $${s.whaleUsd}` : '✗ Whale Alerts', callback_data: `set_whale:${c}` },
+        { text: s.whaleUsd > 0 ? `🐋 Whale Alert $${s.whaleUsd} ✅` : '🐋 Whale Alerts', callback_data: `set_whale:${c}` },
       ],
       [
-        { text: s.linkTg ? '🔗 TG Linked ✅' : '🔗 Link TG',      callback_data: `set_linktg:${c}` },
-        { text: s.circSupply > 0 ? `🔄 Supply: ${(s.circSupply / 1e6).toFixed(0)}M` : '🔄 Circ Supply Not Set', callback_data: `set_supply:${c}` },
+        { text: s.linkTg ? '🐕 TG Linked ✅' : '🐕 Link TG',                       callback_data: `set_linktg:${c}` },
+        { text: s.circSupply > 0 ? `📊 Supply: ${(s.circSupply / 1e6).toFixed(0)}M` : '📊 Circ Supply Not Set', callback_data: `set_supply:${c}` },
       ],
-      [{ text: '💻 Add Buttons',  callback_data: `set_buttons:${c}` }],
-      [{ text: '🎨 Buy Layouts',  callback_data: `set_layouts:${c}` }],
-      [{ text: '🧬 Clone',        callback_data: `set_clone:${c}` }],
-      [{ text: '⚡ Boost your Trending ⚡', callback_data: `set_boost:${c}` }],
     ],
   };
 }
@@ -490,7 +485,7 @@ bot.on('callback_query', async (query) => {
     const groupChatId = data.slice(colonIdx + 1); // e.g. '-1001234...'
 
     // Stub buttons
-    if (['trending', 'buttons', 'layouts', 'clone', 'boost'].includes(key)) {
+    if (['trending'].includes(key)) {
       await tgRequest('answerCallbackQuery', {
         callback_query_id: query.id,
         text: '🔜 Coming soon!',
