@@ -139,6 +139,28 @@ async function getHolderCount(mint) {
   }
 }
 
+// ─── Market Cap (DexScreener, cached 5 min) ───────────────────────────────────
+const mcapCache = new Map(); // mint → { mcap, ts }
+
+async function getMarketCap(mint) {
+  const cached = mcapCache.get(mint);
+  if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.mcap;
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+    const data = await res.json();
+    const pairs = data?.pairs;
+    if (!pairs || pairs.length === 0) return null;
+    // Pick the pair with highest liquidity
+    const best = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+    const mcap = best?.fdv ?? best?.marketCap ?? null;
+    if (mcap != null) mcapCache.set(mint, { mcap, ts: Date.now() });
+    return mcap;
+  } catch (e) {
+    console.error('Market cap fetch failed:', e.message);
+    return null;
+  }
+}
+
 // ─── Token Metadata ────────────────────────────────────────────────────────────
 async function getTokenName(mint) {
   try {
@@ -273,7 +295,7 @@ async function refreshSettings(chatId, messageId, sub) {
 }
 
 // ─── Alert Builder ─────────────────────────────────────────────────────────────
-function buildAlertMessage(sub, tx, swap, tokenOut, holderCount) {
+function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
   const s = sub.settings;
   const decimals = tokenOut.rawTokenAmount?.decimals ?? 0;
   const rawAmount = tokenOut.rawTokenAmount?.tokenAmount ?? '0';
@@ -295,12 +317,13 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount) {
     ? `🐋🐕 <b>WHALE BUY! WOOF WOOF!</b>`
     : `<b>${name} Buy!</b>`;
 
-  // Market cap line
+  // Market cap line — from DexScreener (auto), fallback to manual circSupply
   let mcapLine = '';
-  if (s.circSupply > 0 && usdValue > 0 && tokenAmount > 0) {
+  if (marketCap != null) {
+    mcapLine = `📊 Market Cap: <b>${formatUsd(marketCap)}</b>\n`;
+  } else if (s.circSupply > 0 && usdValue > 0 && tokenAmount > 0) {
     const pricePerToken = usdValue / tokenAmount;
-    const mcap = pricePerToken * s.circSupply;
-    mcapLine = `📊 Market Cap: <b>${formatUsd(mcap)}</b>\n`;
+    mcapLine = `📊 Market Cap: <b>${formatUsd(pricePerToken * s.circSupply)}</b>\n`;
   }
 
   // Price line
@@ -338,9 +361,12 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
   const usdValue = solSpent * solPriceUsd;
   if (s.minBuyUsd > 0 && usdValue < s.minBuyUsd) return;
 
-  // Fetch holder count in parallel with building message
-  const holderCount = await getHolderCount(sub.tokenMint);
-  const message = buildAlertMessage(sub, tx, swap, tokenOut, holderCount);
+  // Fetch holder count + market cap in parallel
+  const [holderCount, marketCap] = await Promise.all([
+    getHolderCount(sub.tokenMint),
+    getMarketCap(sub.tokenMint),
+  ]);
+  const message = buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap);
 
   if (s.gif) {
     const method = s.gif.type === 'animation' ? 'sendAnimation' : 'sendPhoto';
