@@ -376,6 +376,17 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         ],
       },
     });
+  } else if (param?.startsWith('settings_')) {
+    const groupChatId = param.slice(9);
+    const sub = findSub(groupChatId);
+    if (!sub) {
+      await tgRequest('sendMessage', {
+        chat_id: dmChatId,
+        text: '❌ No token set up for that group yet. Use /add in the group first.',
+      });
+      return;
+    }
+    await showSettings(dmChatId, sub);
   } else {
     await tgRequest('sendMessage', {
       chat_id: dmChatId,
@@ -384,7 +395,7 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
         'Woof! Add me to your group and type /add to set up real-time buy alerts.\n\n' +
         '<b>Commands:</b>\n' +
         '/add — Set up buy alerts (use in your group)\n' +
-        '/settings — Manage settings (use in DM)',
+        '/settings — Manage settings (group or DM)',
       parse_mode: 'HTML',
     });
   }
@@ -411,21 +422,38 @@ bot.onText(/\/add(?:@\w+)?/, async (msg) => {
   });
 });
 
-// /settings — show settings panel in DM
-bot.onText(/\/settings/, async (msg) => {
+// /settings — show settings panel (works in group or DM)
+bot.onText(/\/settings(?:@\w+)?/, async (msg) => {
   const userId = String(msg.from.id);
-  const dmChatId = String(msg.chat.id);
+  const chatId = String(msg.chat.id);
+
+  // In a group: send a deep-link button to open settings in DM
   if (msg.chat.type !== 'private') {
-    await tgRequest('sendMessage', { chat_id: dmChatId, text: 'Message me directly to manage settings.' });
+    const sub = findSub(chatId);
+    if (!sub) {
+      await tgRequest('sendMessage', { chat_id: chatId, text: '❌ No token set up yet. Use /add first.' });
+      return;
+    }
+    const link = `https://t.me/${botUsername}?start=settings_${chatId}`;
+    await tgRequest('sendMessage', {
+      chat_id: chatId,
+      text: `🐕 <b>Inu Buy Bot — Settings</b>\n\nClick below to manage settings for <b>${sub.settings.tokenName || sub.tokenMint.slice(0, 8) + '...'}</b>`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[{ text: '⚙️ Open Settings', url: link }]],
+      },
+    });
     return;
   }
+
+  // In DM: show settings directly
   const storage = loadStorage();
   const sub = storage.subscriptions.find((s) => s.ownerId === userId);
   if (!sub) {
-    await tgRequest('sendMessage', { chat_id: dmChatId, text: '❌ No token set up yet. Use /add in your group first.' });
+    await tgRequest('sendMessage', { chat_id: chatId, text: '❌ No token set up yet. Use /add in your group first.' });
     return;
   }
-  await showSettings(dmChatId, sub);
+  await showSettings(chatId, sub);
 });
 
 // /cancel — abort any active input state
