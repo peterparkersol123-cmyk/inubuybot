@@ -67,6 +67,61 @@ async function updateSolPrice() {
   }
 }
 
+// ─── Formatting helpers ────────────────────────────────────────────────────────
+function formatUsd(amount) {
+  if (amount >= 1e9) return `$${(amount / 1e9).toFixed(2)}B`;
+  if (amount >= 1e6) return `$${(amount / 1e6).toFixed(2)}M`;
+  if (amount >= 1e3) return `$${(amount / 1e3).toFixed(0)}K`;
+  return `$${amount.toFixed(2)}`;
+}
+
+function formatTokenAmount(amount) {
+  if (amount >= 1e9) return `${(amount / 1e9).toFixed(2)}B`;
+  if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}M`;
+  if (amount >= 1e3) return `${(amount / 1e3).toFixed(1)}K`;
+  return amount.toLocaleString();
+}
+
+// ─── Holder Count (cached, 5-min TTL) ─────────────────────────────────────────
+const holderCache = new Map(); // mint → { count, ts }
+
+async function getHolderCount(mint) {
+  const cached = holderCache.get(mint);
+  if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.count;
+  try {
+    const res = await fetch(
+      `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getProgramAccounts',
+          params: [
+            'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+            {
+              encoding: 'base64',
+              dataSlice: { offset: 0, length: 0 }, // no data, just count
+              filters: [
+                { dataSize: 165 },
+                { memcmp: { offset: 0, bytes: mint } },
+              ],
+            },
+          ],
+        }),
+      }
+    );
+    const data = await res.json();
+    const count = data.result?.length ?? 0;
+    holderCache.set(mint, { count, ts: Date.now() });
+    return count;
+  } catch (e) {
+    console.error('Holder count fetch failed:', e.message);
+    return null;
+  }
+}
+
 // ─── Token Metadata ────────────────────────────────────────────────────────────
 async function getTokenName(mint) {
   try {
@@ -207,7 +262,7 @@ async function refreshSettings(chatId, messageId, sub) {
 }
 
 // ─── Alert Builder ─────────────────────────────────────────────────────────────
-function buildAlertMessage(sub, tx, swap, tokenOut) {
+function buildAlertMessage(sub, tx, swap, tokenOut, holderCount) {
   const s = sub.settings;
   const decimals = tokenOut.rawTokenAmount?.decimals ?? 0;
   const rawAmount = tokenOut.rawTokenAmount?.tokenAmount ?? '0';
@@ -218,30 +273,46 @@ function buildAlertMessage(sub, tx, swap, tokenOut) {
   const isWhale = s.whaleUsd > 0 && usdValue >= s.whaleUsd;
 
   const buyer = tx.feePayer || 'Unknown';
-  const shortBuyer = `${buyer.slice(0, 6)}...${buyer.slice(-4)}`;
   const name = s.tokenName || sub.tokenMint.slice(0, 6) + '...';
 
-  const header = isWhale
-    ? `🐋🐕 <b>WHALE BUY! WOOF WOOF!</b>\n\n`
-    : `${s.emoji} <b>Someone just aped in!</b>\n\n`;
+  // Emoji row — repeat emoji based on step size, capped at 20
+  const stepCount = s.stepUsd > 0 ? Math.min(Math.max(Math.floor(usdValue / s.stepUsd), 1), 20) : 1;
+  const emojiRow = Array(stepCount).fill(s.emoji).join('');
 
-  let priceInfo = '';
-  if (s.showPrice && tokenAmount > 0 && usdValue > 0) {
+  // Header
+  const header = isWhale
+    ? `🐋🐕 <b>WHALE BUY! WOOF WOOF!</b>`
+    : `<b>${name} Buy!</b>`;
+
+  // Market cap line
+  let mcapLine = '';
+  if (s.circSupply > 0 && usdValue > 0 && tokenAmount > 0) {
     const pricePerToken = usdValue / tokenAmount;
-    priceInfo = `💵 <b>Price:</b> $${pricePerToken.toFixed(8)}\n`;
-    if (s.circSupply > 0) {
-      const mcap = pricePerToken * s.circSupply;
-      priceInfo += `📊 <b>MCap:</b> $${mcap.toLocaleString(undefined, { maximumFractionDigits: 0 })}\n`;
-    }
+    const mcap = pricePerToken * s.circSupply;
+    mcapLine = `📊 Market Cap: <b>${formatUsd(mcap)}</b>\n`;
   }
 
+  // Price line
+  let priceLine = '';
+  if (s.showPrice && tokenAmount > 0 && usdValue > 0) {
+    const pricePerToken = usdValue / tokenAmount;
+    priceLine = `💵 Price: <b>$${pricePerToken.toFixed(8)}</b>\n`;
+  }
+
+  // Holder count line
+  const holderLine = holderCount != null
+    ? `🏠 Holders: <b>${holderCount.toLocaleString()}</b>\n`
+    : '';
+
   return (
-    header +
-    `🦴 <b>Spent:</b> ${solSpent.toFixed(4)} SOL${usdValue > 0 ? ` (~$${usdValue.toFixed(2)})` : ''}\n` +
-    `🐾 <b>Got:</b> ${tokenAmount.toLocaleString()} ${name}\n` +
-    priceInfo +
-    `👤 <b>Buyer:</b> <code>${shortBuyer}</code>\n` +
-    `🔗 <a href="https://solscan.io/tx/${tx.signature}">View on Solscan</a>`
+    `${header}\n` +
+    `${emojiRow}\n\n` +
+    `➡️ Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
+    `⬅️ Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
+    `👤 <a href="https://solscan.io/account/${buyer}">Buyer</a> / <a href="https://solscan.io/tx/${tx.signature}">Txn</a>\n` +
+    priceLine +
+    mcapLine +
+    holderLine
   );
 }
 
@@ -253,7 +324,9 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
   const usdValue = solSpent * solPriceUsd;
   if (s.minBuyUsd > 0 && usdValue < s.minBuyUsd) return;
 
-  const message = buildAlertMessage(sub, tx, swap, tokenOut);
+  // Fetch holder count in parallel with building message
+  const holderCount = await getHolderCount(sub.tokenMint);
+  const message = buildAlertMessage(sub, tx, swap, tokenOut, holderCount);
 
   // Alert inline buttons (chart + optional TG link)
   const alertButtons = [];
