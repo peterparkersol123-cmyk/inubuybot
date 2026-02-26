@@ -55,15 +55,33 @@ function defaultSettings() {
 // ─── SOL Price (updated every 2 min) ──────────────────────────────────────────
 let solPriceUsd = 0;
 async function updateSolPrice() {
-  try {
-    const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
-    const data = await res.json();
-    const price = parseFloat(data.price);
-    if (price > 0) solPriceUsd = price;
-    console.log(`SOL price updated: $${solPriceUsd}`);
-  } catch (e) {
-    console.error('SOL price fetch failed:', e.message);
+  // Try CoinGecko first (no geo-restrictions), fall back to Kraken
+  const sources = [
+    async () => {
+      const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+      const data = await res.json();
+      return data?.solana?.usd;
+    },
+    async () => {
+      const res = await fetch('https://api.kraken.com/0/public/Ticker?pair=SOLUSD');
+      const data = await res.json();
+      return parseFloat(data?.result?.SOLUSD?.c?.[0]);
+    },
+  ];
+
+  for (const source of sources) {
+    try {
+      const price = await source();
+      if (price > 0) {
+        solPriceUsd = price;
+        console.log(`SOL price updated: $${solPriceUsd}`);
+        return;
+      }
+    } catch (e) {
+      console.error('SOL price source failed:', e.message);
+    }
   }
+  console.error('All SOL price sources failed, keeping last value:', solPriceUsd);
 }
 
 // ─── Formatting helpers ────────────────────────────────────────────────────────
