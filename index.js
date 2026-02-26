@@ -225,10 +225,6 @@ function buildSettingsKeyboard(sub) {
       [
         { text: s.whaleUsd > 0 ? `🐋 Whale Alert $${s.whaleUsd} ✅` : '🐋 Whale Alerts', callback_data: `set_whale:${c}` },
       ],
-      [
-        { text: s.linkTg ? '🐕 TG Linked ✅' : '🐕 Link TG',                       callback_data: `set_linktg:${c}` },
-        { text: s.circSupply > 0 ? `📊 Supply: ${(s.circSupply / 1e6).toFixed(0)}M` : '📊 Circ Supply Not Set', callback_data: `set_supply:${c}` },
-      ],
     ],
   };
 }
@@ -325,7 +321,6 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
 
   // Alert inline buttons (chart + optional TG link)
   const alertButtons = [];
-  if (s.linkTg) alertButtons.push({ text: '🐕 Telegram', url: s.linkTg });
   alertButtons.push({
     text: '📈 Chart',
     url: `https://dexscreener.com/solana/${sub.tokenMint}`,
