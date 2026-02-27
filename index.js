@@ -43,7 +43,7 @@ function defaultSettings() {
     minBuyUsd: 0,      // minimum buy in USD to trigger alert (0 = all)
     emoji: '🐕',       // emoji shown in alert header (fallback text)
     emojiId: null,     // custom emoji ID if set via Telegram custom emoji
-    stepUsd: 0,        // step size in USD (stored, future use)
+    stepUsd: 0,        // step size in USD — 1 emoji per step (0 = always 1 emoji)
     showPrice: false,  // show token price per unit in alert
     ignoreMev: true,   // skip txs where feePayer !== token receiver
     whaleUsd: 50000,   // whale alert threshold in USD (0 = off)
@@ -117,6 +117,27 @@ function formatTokenAmount(amount) {
   if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}M`;
   if (amount >= 1e3) return `${(amount / 1e3).toFixed(1)}K`;
   return amount.toLocaleString();
+}
+
+// ─── Wallet Position Tracking (in-memory) ─────────────────────────────────────
+// Tracks each wallet's average buy price per token to show PnL on repeat buys
+// key: "${walletAddress}|${tokenMint}" → { totalSpentUsd, totalTokens }
+const walletPositions = new Map();
+
+function getPosition(wallet, mint) {
+  return walletPositions.get(`${wallet}|${mint}`) || null;
+}
+
+function updatePosition(wallet, mint, usdSpent, tokensReceived) {
+  if (!usdSpent || !tokensReceived) return;
+  const key = `${wallet}|${mint}`;
+  const existing = walletPositions.get(key);
+  if (existing) {
+    existing.totalSpentUsd  += usdSpent;
+    existing.totalTokens    += tokensReceived;
+  } else {
+    walletPositions.set(key, { totalSpentUsd: usdSpent, totalTokens: tokensReceived });
+  }
 }
 
 // ─── Holder Count (cached, 5-min TTL) ─────────────────────────────────────────
@@ -315,7 +336,7 @@ async function refreshSettings(chatId, messageId, sub) {
 }
 
 // ─── Alert Builder ─────────────────────────────────────────────────────────────
-function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
+function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prevPosition) {
   const s = sub.settings;
   const decimals = tokenOut.rawTokenAmount?.decimals ?? 0;
   const rawAmount = tokenOut.rawTokenAmount?.tokenAmount ?? '0';
@@ -361,6 +382,21 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
     ? `${CE.holders()} Holders: <b>${holderCount.toLocaleString()}</b>\n`
     : '';
 
+  // Position / PnL line
+  let positionLine = '';
+  if (usdValue > 0 && tokenAmount > 0) {
+    if (!prevPosition) {
+      positionLine = `🆕 <b>New Position</b>\n`;
+    } else {
+      const avgBuyPrice    = prevPosition.totalSpentUsd / prevPosition.totalTokens;
+      const currentPrice   = usdValue / tokenAmount;
+      const pnlPct         = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100;
+      const sign           = pnlPct >= 0 ? '+' : '';
+      const icon           = pnlPct >= 0 ? '📈' : '📉';
+      positionLine = `${icon} Position: <b>${sign}${pnlPct.toFixed(1)}%</b>\n`;
+    }
+  }
+
   const chartUrl = `https://dexscreener.com/solana/${sub.tokenMint}`;
   const buyUrl   = `https://jup.ag/swap/SOL-${sub.tokenMint}`;
 
@@ -370,6 +406,7 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
     `${CE.arrowRight()} Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
     `${CE.arrowLeft()} Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
     `${CE.buyer()} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | ${CE.chart()}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
+    positionLine +
     priceLine +
     mcapLine +
     holderLine
@@ -389,7 +426,19 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
     getHolderCount(sub.tokenMint),
     getMarketCap(sub.tokenMint),
   ]);
-  const message = buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap);
+
+  // Snapshot position BEFORE this buy (so PnL reflects previous avg vs current price)
+  const buyer = tx.feePayer;
+  const prevPosition = buyer ? getPosition(buyer, sub.tokenMint) : null;
+  const message = buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prevPosition);
+
+  // Update position AFTER building message
+  if (buyer && usdValue > 0) {
+    const decimals   = swap.tokenOutputs?.find(t => t.mint === sub.tokenMint)?.rawTokenAmount?.decimals ?? 0;
+    const rawAmount  = swap.tokenOutputs?.find(t => t.mint === sub.tokenMint)?.rawTokenAmount?.tokenAmount ?? '0';
+    const tokenAmt   = Number(rawAmount) / Math.pow(10, decimals);
+    updatePosition(buyer, sub.tokenMint, usdValue, tokenAmt);
+  }
 
   if (s.gif) {
     const method = s.gif.type === 'animation' ? 'sendAnimation' : 'sendPhoto';
