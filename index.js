@@ -46,7 +46,8 @@ function defaultSettings() {
     stepUsd: 0,        // step size in USD — 1 emoji per step (0 = always 1 emoji)
     showPrice: false,  // show token price per unit in alert
     whaleUsd: 50000,   // whale alert threshold in USD (0 = off)
-    linkTg: '',        // project Telegram link shown as button in alert
+    linkTg: '',        // project Telegram link (legacy — use links[] instead)
+    links: [],         // up to 3 custom links: [{ label: 'Chart', url: 'https://...' }]
     circSupply: 0,     // circulating supply for market cap calc
     tokenName: '',     // token symbol fetched from Helius metadata
     active: false,     // whether alerts are currently enabled (must be started manually)
@@ -178,6 +179,13 @@ function markSeen(sig) {
     for (let i = 0; i < 2500; i++) seenSignatures.delete(it.next().value);
   }
 }
+
+// Signatures currently being fetched by the WS handler (not yet marked seen).
+// The polling loop checks this to avoid duplicating an in-flight WS fetch.
+const pendingSigs = new Set();
+
+// Per-mint timestamp of the last log notification received on the WS.
+const wsLastActivity = new Map();
 
 // ─── Holder Count (cached, 30-min TTL) ────────────────────────────────────────
 const holderCache = new Map(); // mint → { count, ts }
@@ -350,7 +358,7 @@ async function processTransaction(tx, storage) {
 // Poll the Helius enhanced-transaction history API on a fixed schedule.
 // Cost: ~10 credits × 480 calls/day = 4 800 credits/day regardless of token activity.
 // For active tokens (>240 buys/day) this is cheaper than paying per webhook event.
-const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 min — fallback only, WS is primary
+const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 min — fallback safety net for WS gaps
 
 async function pollForSwaps() {
   const storage = loadStorage();
@@ -369,7 +377,8 @@ async function pollForSwaps() {
 
       let newCount = 0;
       for (const tx of txs) {
-        if (!tx.signature || seenSignatures.has(tx.signature)) continue;
+        // Skip if already processed or currently being fetched by the WS handler
+        if (!tx.signature || seenSignatures.has(tx.signature) || pendingSigs.has(tx.signature)) continue;
         markSeen(tx.signature);
         newCount++;
         await processTransaction(tx, storage);
@@ -421,33 +430,59 @@ function startWsForMint(mint) {
     pingTimer = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.ping();
     }, 20_000);
+    wsLastActivity.set(mint, Date.now());
   });
 
   ws.on('message', async (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
 
+      // Health-check response — clear the pending flag
+      if (msg.id === 999) {
+        ws._healthCheckPending = false;
+        return;
+      }
+
       // Subscription confirmed
       if (msg.id === 1 && msg.result != null) {
         console.log(`[WS] Subscribed for ${mint.slice(0, 8)} (subId=${msg.result})`);
+        wsLastActivity.set(mint, Date.now());
         return;
       }
       if (msg.method !== 'logsNotification') return;
+
+      // Any log notification counts as activity
+      wsLastActivity.set(mint, Date.now());
 
       const value = msg.params?.result?.value;
       if (!value || value.err !== null) return; // skip failed txs
 
       const { signature } = value;
-      if (!signature || seenSignatures.has(signature)) return;
-      markSeen(signature);
+      // Skip if already seen or already being fetched by a concurrent WS handler
+      if (!signature || seenSignatures.has(signature) || pendingSigs.has(signature)) return;
 
+      // Reserve the signature — polling will skip it while we're fetching
+      pendingSigs.add(signature);
       console.log(`[WS] New tx ${signature.slice(0, 12)} for ${mint.slice(0, 8)}`);
 
-      // Fetch enhanced transaction from Helius
-      const tx = await fetchEnhancedTx(signature);
-      if (!tx) return;
-      const storage = loadStorage();
-      await processTransaction(tx, storage);
+      try {
+        const tx = await fetchEnhancedTx(signature);
+        if (tx) {
+          // Only mark seen AFTER a successful fetch so polling can retry on failure
+          markSeen(signature);
+          const storage = loadStorage();
+          await processTransaction(tx, storage);
+        } else {
+          // Helius returned empty array — tx not indexed yet or unknown; mark seen to prevent loops
+          markSeen(signature);
+          console.warn(`[WS] fetchEnhancedTx returned null for ${signature.slice(0, 12)} — skipping`);
+        }
+      } catch (e) {
+        // DO NOT markSeen on error — polling fallback will retry this tx via history API
+        console.error(`[WS] fetchEnhancedTx failed for ${signature.slice(0, 12)}:`, e.message, '— will retry via polling');
+      } finally {
+        pendingSigs.delete(signature);
+      }
     } catch (e) {
       console.error(`[WS] Handler error for ${mint.slice(0, 8)}:`, e.message);
     }
@@ -456,11 +491,12 @@ function startWsForMint(mint) {
   const cleanup = () => {
     if (pingTimer) clearInterval(pingTimer);
     wsConnections.delete(mint);
+    wsLastActivity.delete(mint);
   };
 
-  ws.on('close', () => {
+  ws.on('close', (code) => {
     cleanup();
-    console.log(`[WS] Closed for ${mint.slice(0, 8)} — reconnecting in 5 s`);
+    console.log(`[WS] Closed for ${mint.slice(0, 8)} (code=${code}) — reconnecting in 5 s`);
     setTimeout(() => startWsForMint(mint), 5_000);
   });
 
@@ -529,13 +565,16 @@ function buildSettingsKeyboard(sub) {
       ],
       [
         { text: `${s.emoji} Emoji`,                                                  callback_data: `set_emoji:${c}` },
-        { text: `🐾 Step $${s.stepUsd}`,                                             callback_data: `set_step:${c}` },
+        { text: `🐾 Step ${s.stepUsd > 0 ? '$' + s.stepUsd : 'Auto'}`,             callback_data: `set_step:${c}` },
       ],
       [
         { text: s.showPrice ? '✅ Show Price' : '✗ Show Price',                      callback_data: `set_price:${c}` },
       ],
       [
         { text: s.whaleUsd > 0 ? `🐋 Whale Alert $${s.whaleUsd} ✅` : '🐋 Whale Alerts', callback_data: `set_whale:${c}` },
+      ],
+      [
+        { text: s.links?.length > 0 ? `🔗 Links: ${s.links.map(l => l.label).join(' | ')}` : '🔗 Links (none set)', callback_data: `set_links:${c}` },
       ],
       [
         { text: '🎨 Customise Icons', callback_data: `set_icons:${c}` },
@@ -644,7 +683,9 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
   const name = s.tokenName || sub.tokenMint.slice(0, 6) + '...';
 
   // Emoji row — repeat emoji based on step size, capped at 20
-  const stepCount = s.stepUsd > 0 ? Math.min(Math.max(Math.floor(usdValue / s.stepUsd), 1), 20) : 1;
+  // stepUsd=0 means "auto" → 1 emoji per $10 spent
+  const effectiveStep = s.stepUsd > 0 ? s.stepUsd : 10;
+  const stepCount = Math.min(Math.max(Math.floor(usdValue / effectiveStep), 1), 20);
   const singleEmoji = s.emojiId
     ? `<tg-emoji emoji-id="${s.emojiId}">${s.emoji}</tg-emoji>`
     : s.emoji;
@@ -697,12 +738,18 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
   const chartUrl = `https://dexscreener.com/solana/${sub.tokenMint}`;
   const buyUrl   = `https://jup.ag/swap/SOL-${sub.tokenMint}`;
 
+  // Custom links row — use user-defined links if set, else fall back to Chart | Buy
+  const customLinks = (s.links || []).filter(l => l?.url && l?.label);
+  const linksStr = customLinks.length > 0
+    ? customLinks.map(l => `<a href="${l.url}">${l.label}</a>`).join(' | ')
+    : `${renderIcon(icons.chart)}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>`;
+
   return (
     `${header}\n` +
     `${emojiRow}\n\n` +
     `${renderIcon(icons.spent)} Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
     `${renderIcon(icons.got)} Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
-    `${renderIcon(icons.buyer)} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | ${renderIcon(icons.chart)}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
+    `${renderIcon(icons.buyer)} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | ${linksStr}\n` +
     positionLine +
     priceLine +
     mcapLine +
@@ -976,12 +1023,26 @@ bot.onText(/\/status/, async (msg) => {
         `    minBuy: $${s.settings.minBuyUsd}`
       ).join('\n');
 
+  const wsStateNames = ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'];
+  const wsLines = wsConnections.size === 0
+    ? '  <i>No active WebSocket connections</i>'
+    : [...wsConnections.entries()].map(([m, w]) => {
+        const state = wsStateNames[w.readyState] ?? '?';
+        const lastAct = wsLastActivity.get(m);
+        const ageSec = lastAct ? Math.round((Date.now() - lastAct) / 1000) : null;
+        const ageStr = ageSec != null ? `${ageSec}s ago` : 'never';
+        const health = w._healthCheckPending ? ' ⚠️ health check pending' : '';
+        return `  • <code>${m.slice(0, 8)}</code> ${state} | last msg: ${ageStr}${health}`;
+      }).join('\n');
+
   const text =
     `🐕 <b>Inu Buy Bot — Status</b>\n\n` +
     `💾 Storage: <code>${STORAGE_FILE}</code>\n` +
     `📡 Helius webhook ID: <code>${storage.webhookId || 'none'}</code>\n` +
     `💰 SOL price: <b>$${solPriceUsd > 0 ? solPriceUsd.toFixed(2) : '(not loaded)'}</b>\n` +
-    `🌐 Webhook URL: <code>${getWebhookURL()}</code>\n\n` +
+    `🌐 Webhook URL: <code>${getWebhookURL()}</code>\n` +
+    `🔌 Seen sigs: ${seenSignatures.size} | Pending: ${pendingSigs.size}\n\n` +
+    `<b>WebSocket connections (${wsConnections.size}):</b>\n${wsLines}\n\n` +
     `<b>Subscriptions (${subs.length}):</b>\n${subLines}`;
 
   await tgRequest('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' });
@@ -1079,11 +1140,37 @@ bot.on('callback_query', async (query) => {
         await tgRequest('sendMessage', {
           chat_id: dmChatId,
           text:
-            `📊 Enter the step size in USD for buy progression.\n\n` +
-            `Current: <b>$${sub.settings.stepUsd}</b>\n\n/cancel to abort.`,
+            `📊 Enter the step size in USD — one emoji is added per step.\n\n` +
+            `Current: <b>${sub.settings.stepUsd > 0 ? '$' + sub.settings.stepUsd : 'Auto ($10/emoji)'}</b>\n\n` +
+            `Send <code>0</code> for auto-scale ($10/emoji), or a dollar amount e.g. <code>25</code>.\n/cancel to abort.`,
           parse_mode: 'HTML',
         });
         break;
+
+      case 'links': {
+        const currentLinks = sub.settings.links || [];
+        userStates.set(userId, {
+          step: `awaiting_links:${groupChatId}`,
+          msgId,
+          linkPhase: 'url',
+          linkIdx: 0,
+          linkDraft: [],
+        });
+        let prompt = '🔗 <b>Custom Links Setup</b>\n\nSet up to 3 links shown on every buy alert.\n\n';
+        if (currentLinks.length > 0) {
+          prompt += '<b>Current links:</b>\n' +
+            currentLinks.map((l, i) => `  ${i + 1}. <b>${l.label}</b> — ${l.url}`).join('\n') +
+            '\n\n';
+        }
+        prompt += `Send a URL for <b>Link 1</b>\n(type <code>skip</code> to skip this slot, /cancel to abort):`;
+        await tgRequest('sendMessage', {
+          chat_id: dmChatId,
+          text: prompt,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        });
+        break;
+      }
 
       case 'active':
         sub.settings.active = !sub.settings.active;
@@ -1280,6 +1367,81 @@ bot.on('message', async (msg) => {
 
   let error = null;
 
+  // ── Links wizard (URL → label → URL → label → …, up to 3 links) ──
+  if (action === 'links') {
+    const { linkPhase, linkIdx, linkDraft } = state;
+    const text = msg.text?.trim();
+
+    if (linkPhase === 'url') {
+      if (text?.toLowerCase() === 'skip' || text?.toLowerCase() === 'done') {
+        // Finish early — save whatever links have been collected so far
+        sub.settings.links = (linkDraft || []).filter(l => l?.url && l?.label);
+        saveSub(sub);
+        userStates.delete(userId);
+        const n = sub.settings.links.length;
+        await tgRequest('sendMessage', { chat_id: dmChatId, text: `✅ Links saved! (${n} link${n !== 1 ? 's' : ''} set)` });
+        if (msgId) await refreshSettings(dmChatId, msgId, sub);
+        else await showSettings(dmChatId, sub);
+        return;
+      }
+      if (!text?.startsWith('http')) {
+        await tgRequest('sendMessage', {
+          chat_id: dmChatId,
+          text: '❌ Please send a valid URL starting with <code>https://</code>\n\nOr type <code>skip</code> to finish, /cancel to abort.',
+          parse_mode: 'HTML',
+        });
+        return;
+      }
+      const draft = linkDraft || [];
+      draft[linkIdx] = { url: text, label: '' };
+      state.linkDraft = draft;
+      state.linkPhase = 'label';
+      userStates.set(userId, state);
+      await tgRequest('sendMessage', {
+        chat_id: dmChatId,
+        text: `✅ URL saved!\n\nNow send a <b>label</b> for Link ${linkIdx + 1} (max 7 chars, e.g. <code>Chart</code>, <code>X</code>, <code>Web</code>):`,
+        parse_mode: 'HTML',
+      });
+    } else {
+      // 'label' phase
+      if (!text) {
+        await tgRequest('sendMessage', { chat_id: dmChatId, text: '❌ Please send a label (max 7 characters).' });
+        return;
+      }
+      const label = text.slice(0, 7);
+      const draft = linkDraft || [];
+      draft[linkIdx] = { ...(draft[linkIdx] || {}), label };
+      state.linkDraft = draft;
+
+      if (linkIdx < 2) {
+        state.linkPhase = 'url';
+        state.linkIdx = linkIdx + 1;
+        userStates.set(userId, state);
+        await tgRequest('sendMessage', {
+          chat_id: dmChatId,
+          text:
+            `✅ Link ${linkIdx + 1} saved as "<b>${label}</b>"!\n\n` +
+            `Send a URL for <b>Link ${linkIdx + 2}</b>\n(or type <code>skip</code> to finish, /cancel to abort):`,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        });
+      } else {
+        // All 3 done
+        sub.settings.links = draft.filter(l => l?.url && l?.label);
+        saveSub(sub);
+        userStates.delete(userId);
+        await tgRequest('sendMessage', {
+          chat_id: dmChatId,
+          text: `✅ Link 3 saved as "<b>${label}</b>"! All links updated.`,
+          parse_mode: 'HTML',
+        });
+        if (msgId) await refreshSettings(dmChatId, msgId, sub);
+        else await showSettings(dmChatId, sub);
+      }
+    }
+    return;
+  }
+
   // ── Icon field input ──
   if (action.startsWith('icon_')) {
     const field = action.slice(5); // e.g. 'header'
@@ -1448,7 +1610,7 @@ app.listen(PORT, async () => {
   try { await registerBotCommands(); } catch (e) { console.error('Commands error:', e.message); }
 
   await updateSolPrice();
-  setInterval(updateSolPrice, 2 * 60 * 1000);
+  setInterval(updateSolPrice, 15 * 60 * 1000); // every 15 min — price doesn't need to be real-time
 
   // ── Delete existing Helius webhook so we stop being billed per-event ──────
   if (startupStorage.webhookId) {
@@ -1488,7 +1650,32 @@ app.listen(PORT, async () => {
   // ── Start real-time WebSocket subscriptions ───────────────────────────────
   syncWsSubscriptions();
 
-  // ── Polling fallback (catches anything the WS misses, e.g. brief disconnects)
+  // ── WS health check — send JSON-RPC getHealth every 60 s ─────────────────
+  // If the previous health check went unanswered, the connection is silently
+  // dead and we force a reconnect via terminate() → close → startWsForMint.
+  setInterval(() => {
+    for (const [mint, ws] of wsConnections.entries()) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+
+      if (ws._healthCheckPending) {
+        // Previous ping was never answered — connection is stale
+        console.warn(`[WS] Health check unanswered for ${mint.slice(0, 8)} — forcing reconnect`);
+        ws.terminate(); // triggers close → 5 s → startWsForMint
+        continue;
+      }
+
+      // Send a new health ping
+      ws._healthCheckPending = true;
+      try {
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id: 999, method: 'getHealth' }));
+      } catch (e) {
+        console.error(`[WS] Health ping send failed for ${mint.slice(0, 8)}:`, e.message);
+        ws.terminate();
+      }
+    }
+  }, 60_000);
+
+  // ── Polling fallback (catches anything the WS misses, e.g. failed fetchEnhancedTx)
   setInterval(pollForSwaps, POLL_INTERVAL_MS);
   console.log(`[POLL] Fallback polling started — interval=${POLL_INTERVAL_MS / 1000}s`);
   setTimeout(pollForSwaps, 8000); // one initial poll after startup
