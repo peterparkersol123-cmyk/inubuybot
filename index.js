@@ -335,6 +335,7 @@ function buildSettingsKeyboard(sub) {
       ],
       [
         { text: '🎨 Customise Icons', callback_data: `set_icons:${c}` },
+        { text: '👁 Preview Alert',   callback_data: `set_preview:${c}` },
       ],
       [
         { text: '🗑️ Remove Token', callback_data: `set_remove:${c}` },
@@ -503,6 +504,55 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
     mcapLine +
     holderLine
   );
+}
+
+async function sendSettingsPreview(dmChatId, sub) {
+  const s = sub.settings;
+  const price = solPriceUsd > 0 ? solPriceUsd : 150;
+
+  // Target ~3 emoji steps so the row looks meaningful
+  const targetUsd    = s.stepUsd > 0 ? s.stepUsd * 3 : 150;
+  const mockLamports = (targetUsd / price) * 1e9;
+  const mockDecimals = 6;
+  const mockRawAmt   = String(1_000_000 * Math.pow(10, mockDecimals)); // 1M tokens
+
+  const mockTx = {
+    feePayer:  'PreviewWa11etAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    signature: 'PreviewTxSigAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+  };
+  const mockSwap = {
+    nativeInput:  { amount: mockLamports },
+    tokenOutputs: [{ mint: sub.tokenMint, rawTokenAmount: { tokenAmount: mockRawAmt, decimals: mockDecimals } }],
+  };
+  const mockTokenOut = {
+    mint: sub.tokenMint,
+    rawTokenAmount: { tokenAmount: mockRawAmt, decimals: mockDecimals },
+  };
+
+  // Use cached data if available, else show plausible placeholders
+  const marketCap  = mcapCache.get(sub.tokenMint)?.mcap ?? null;
+  const holderCount = holderCache.get(sub.tokenMint)?.count ?? null;
+
+  const message = buildAlertMessage(sub, mockTx, mockSwap, mockTokenOut, holderCount, marketCap, null);
+  const preview = `👁 <i>Preview — not a real buy</i>\n\n` + message;
+
+  if (s.gif) {
+    const method   = s.gif.type === 'animation' ? 'sendAnimation' : 'sendPhoto';
+    const mediaKey = s.gif.type === 'animation' ? 'animation' : 'photo';
+    await tgRequest(method, {
+      chat_id: dmChatId,
+      [mediaKey]: s.gif.fileId,
+      caption: preview,
+      parse_mode: 'HTML',
+    });
+  } else {
+    await tgRequest('sendMessage', {
+      chat_id: dmChatId,
+      text: preview,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+    });
+  }
 }
 
 async function sendBuyAlert(sub, tx, swap, tokenOut) {
@@ -825,6 +875,10 @@ bot.on('callback_query', async (query) => {
 
       case 'icons':
         await showIcons(dmChatId, msgId, sub);
+        break;
+
+      case 'preview':
+        await sendSettingsPreview(dmChatId, sub);
         break;
 
       case 'remove':
