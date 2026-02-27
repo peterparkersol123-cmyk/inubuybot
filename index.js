@@ -50,6 +50,7 @@ function defaultSettings() {
     linkTg: '',        // project Telegram link shown as button in alert
     circSupply: 0,     // circulating supply for market cap calc
     tokenName: '',     // token symbol fetched from Helius metadata
+    active: false,     // whether alerts are currently enabled (must be started manually)
     icons: {           // per-field icon overrides { emoji, emojiId }
       header:  { emoji: '🤑', emojiId: '5791791406137744300' },
       whale:   { emoji: '🐋', emojiId: '5051129106305909986' },
@@ -316,8 +317,12 @@ function buildSettingsText(sub) {
 function buildSettingsKeyboard(sub) {
   const s = sub.settings;
   const c = sub.chatId;
+  const isActive = s.active === true;
   return {
     inline_keyboard: [
+      [
+        { text: isActive ? '⏸ Pause Alerts' : '▶️ Start Alerts', callback_data: `set_active:${c}` },
+      ],
       [
         { text: s.gif ? '✅ Gif / Media' : '❌ Gif / Media',                        callback_data: `set_gif:${c}` },
         { text: `🦴 Min Buy $${s.minBuyUsd}`,                                        callback_data: `set_minbuy:${c}` },
@@ -557,6 +562,9 @@ async function sendSettingsPreview(dmChatId, sub) {
 
 async function sendBuyAlert(sub, tx, swap, tokenOut) {
   const s = sub.settings;
+
+  // Skip if alerts are paused (active===false; undefined = legacy sub = treat as active)
+  if (s.active === false) return;
 
   // Min buy filter
   const solSpent = swap.nativeInput ? swap.nativeInput.amount / 1e9 : 0;
@@ -822,6 +830,17 @@ bot.on('callback_query', async (query) => {
         });
         break;
 
+      case 'active':
+        sub.settings.active = !sub.settings.active;
+        saveSub(sub);
+        await tgRequest('answerCallbackQuery', {
+          callback_query_id: query.id,
+          text: sub.settings.active ? '▶️ Alerts started! Woof!' : '⏸ Alerts paused.',
+          show_alert: true,
+        });
+        await refreshSettings(dmChatId, msgId, sub);
+        return;
+
       case 'price':
         sub.settings.showPrice = !sub.settings.showPrice;
         saveSub(sub);
@@ -986,6 +1005,11 @@ bot.on('message', async (msg) => {
 
     try { await syncHeliusWebhook(); } catch (e) { console.error('Helius sync error:', e.message); }
 
+    await tgRequest('sendMessage', {
+      chat_id: dmChatId,
+      text: `✅ <b>${tokenName}</b> is set up!\n\nCustomise your alert below, then press <b>▶️ Start Alerts</b> when you're ready.`,
+      parse_mode: 'HTML',
+    });
     await showSettings(dmChatId, sub);
     return;
   }
