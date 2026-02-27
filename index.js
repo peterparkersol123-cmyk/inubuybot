@@ -350,7 +350,7 @@ async function processTransaction(tx, storage) {
 // Poll the Helius enhanced-transaction history API on a fixed schedule.
 // Cost: ~10 credits × 480 calls/day = 4 800 credits/day regardless of token activity.
 // For active tokens (>240 buys/day) this is cheaper than paying per webhook event.
-const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 min — fallback only, WS is primary
 
 async function pollForSwaps() {
   const storage = loadStorage();
@@ -378,6 +378,117 @@ async function pollForSwaps() {
     } catch (e) {
       console.error(`[POLL] Error for ${mint.slice(0, 8)}:`, e.message);
     }
+  }
+}
+
+// ─── Real-time WebSocket subscriptions ────────────────────────────────────────
+// For each monitored mint, open a logsSubscribe WebSocket to Helius's RPC.
+// On every confirmed log mentioning the mint we fetch the one enhanced tx
+// (~1-5 credits) and process it — real-time with no polling delay.
+const WebSocket = require('ws');
+const wsConnections = new Map(); // mint → ws instance
+
+async function fetchEnhancedTx(signature) {
+  const res = await fetch(
+    `https://api.helius.xyz/v0/transactions/?api-key=${HELIUS_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transactions: [signature] }),
+    }
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data[0] : null;
+}
+
+function startWsForMint(mint) {
+  if (wsConnections.has(mint)) return;
+
+  const ws = new WebSocket(
+    `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
+  );
+  let pingTimer = null;
+
+  ws.on('open', () => {
+    console.log(`[WS] Connected for ${mint.slice(0, 8)}`);
+    ws.send(JSON.stringify({
+      jsonrpc: '2.0', id: 1,
+      method: 'logsSubscribe',
+      params: [{ mentions: [mint] }, { commitment: 'confirmed' }],
+    }));
+    // Keep-alive ping every 20 s
+    pingTimer = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.ping();
+    }, 20_000);
+  });
+
+  ws.on('message', async (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+
+      // Subscription confirmed
+      if (msg.id === 1 && msg.result != null) {
+        console.log(`[WS] Subscribed for ${mint.slice(0, 8)} (subId=${msg.result})`);
+        return;
+      }
+      if (msg.method !== 'logsNotification') return;
+
+      const value = msg.params?.result?.value;
+      if (!value || value.err !== null) return; // skip failed txs
+
+      const { signature } = value;
+      if (!signature || seenSignatures.has(signature)) return;
+      markSeen(signature);
+
+      console.log(`[WS] New tx ${signature.slice(0, 12)} for ${mint.slice(0, 8)}`);
+
+      // Fetch enhanced transaction from Helius
+      const tx = await fetchEnhancedTx(signature);
+      if (!tx) return;
+      const storage = loadStorage();
+      await processTransaction(tx, storage);
+    } catch (e) {
+      console.error(`[WS] Handler error for ${mint.slice(0, 8)}:`, e.message);
+    }
+  });
+
+  const cleanup = () => {
+    if (pingTimer) clearInterval(pingTimer);
+    wsConnections.delete(mint);
+  };
+
+  ws.on('close', () => {
+    cleanup();
+    console.log(`[WS] Closed for ${mint.slice(0, 8)} — reconnecting in 5 s`);
+    setTimeout(() => startWsForMint(mint), 5_000);
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[WS] Error for ${mint.slice(0, 8)}:`, err.message);
+    ws.terminate(); // triggers close → reconnect
+  });
+
+  wsConnections.set(mint, ws);
+}
+
+function stopWsForMint(mint) {
+  const ws = wsConnections.get(mint);
+  if (!ws) return;
+  ws.removeAllListeners('close'); // don't reconnect
+  ws.terminate();
+  wsConnections.delete(mint);
+  console.log(`[WS] Stopped for ${mint.slice(0, 8)}`);
+}
+
+function syncWsSubscriptions() {
+  const storage = loadStorage();
+  const active = new Set(getUniqueMints(storage));
+  for (const mint of active) {
+    if (!wsConnections.has(mint)) startWsForMint(mint);
+  }
+  for (const mint of wsConnections.keys()) {
+    if (!active.has(mint)) stopWsForMint(mint);
   }
 }
 
@@ -1064,7 +1175,7 @@ bot.on('callback_query', async (query) => {
     const storage = loadStorage();
     storage.subscriptions = storage.subscriptions.filter((s) => s.chatId !== groupChatId);
     saveStorage(storage);
-    // (no Helius webhook sync needed — polling discovers new mints automatically)
+    syncWsSubscriptions(); // close WS for any mint no longer tracked
     await tgRequest('editMessageText', {
       chat_id: dmChatId,
       message_id: msgId,
@@ -1141,7 +1252,7 @@ bot.on('message', async (msg) => {
     storage.subscriptions.push(sub);
     saveStorage(storage);
 
-    // (no Helius webhook sync needed — polling discovers new mints automatically)
+    syncWsSubscriptions(); // open WS for the new mint immediately
 
     await tgRequest('sendMessage', {
       chat_id: dmChatId,
@@ -1374,9 +1485,11 @@ app.listen(PORT, async () => {
   }
   console.log(`[POLL] Seeded ${seenSignatures.size} recent signature(s)`);
 
-  // ── Start polling loop ────────────────────────────────────────────────────
+  // ── Start real-time WebSocket subscriptions ───────────────────────────────
+  syncWsSubscriptions();
+
+  // ── Polling fallback (catches anything the WS misses, e.g. brief disconnects)
   setInterval(pollForSwaps, POLL_INTERVAL_MS);
-  console.log(`[POLL] Started — interval=${POLL_INTERVAL_MS / 1000}s`);
-  // Run first poll immediately (after a short delay so everything else is ready)
-  setTimeout(pollForSwaps, 5000);
+  console.log(`[POLL] Fallback polling started — interval=${POLL_INTERVAL_MS / 1000}s`);
+  setTimeout(pollForSwaps, 8000); // one initial poll after startup
 });
