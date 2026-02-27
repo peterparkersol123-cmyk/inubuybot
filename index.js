@@ -84,11 +84,15 @@ async function updateSolPrice() {
   console.error('All SOL price sources failed, keeping last value:', solPriceUsd);
 }
 
-// ─── Custom Emoji (SpyDefi_classic pack) ──────────────────────────────────────
+// ─── Custom Emoji ──────────────────────────────────────────────────────────────
 // Helper: wraps a custom emoji ID with a plain-text fallback
 const ce = (id, fallback) => `<tg-emoji emoji-id="${id}">${fallback}</tg-emoji>`;
 
 const CE = {
+  // Theinucoinemoji pack (own pack)
+  buy        : () => ce('5791791406137744300', '🤑'),   // inu buy icon
+
+  // SpyDefi_classic pack (arrows, icons)
   arrowRight : () => ce('5082729418380543512', '➡️'),   // green right arrow
   arrowLeft  : () => ce('5050816424096826643', '⬅️'),   // green left arrow
   whale      : () => ce('5051129106305909986', '🐋'),   // whale
@@ -329,8 +333,8 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
 
   // Header
   const header = isWhale
-    ? `${CE.whale()}🐕 <b>WHALE BUY! WOOF WOOF!</b>`
-    : `<b>${name} Buy!</b>`;
+    ? `${CE.whale()}${CE.buy()} <b>WHALE BUY! WOOF WOOF!</b>`
+    : `${CE.buy()} <b>${name} Buy!</b>`;
 
   // Market cap line — from DexScreener (auto), fallback to manual circSupply
   let mcapLine = '';
