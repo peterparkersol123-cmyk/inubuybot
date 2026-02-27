@@ -254,10 +254,22 @@ async function getTokenName(mint) {
 }
 
 // ─── Helius Webhook ────────────────────────────────────────────────────────────
+async function createHeliusWebhook(body) {
+  const res = await fetch(
+    `https://api.helius.xyz/v0/webhooks?api-key=${HELIUS_API_KEY}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  );
+  const data = await res.json();
+  if (!data.webhookID) throw new Error(`Helius create failed: ${JSON.stringify(data)}`);
+  return data.webhookID;
+}
+
 async function syncHeliusWebhook() {
   const storage = loadStorage();
   const mints = getUniqueMints(storage);
   const webhookURL = getWebhookURL();
+
+  console.log(`[HELIUS] Syncing webhook | url=${webhookURL} | mints=${mints.length} | existing id=${storage.webhookId || 'none'}`);
 
   const body = {
     webhookURL,
@@ -268,22 +280,26 @@ async function syncHeliusWebhook() {
   };
 
   if (storage.webhookId) {
+    // Try to update existing webhook; recreate if Helius says it's gone
     const res = await fetch(
       `https://api.helius.xyz/v0/webhooks/${storage.webhookId}?api-key=${HELIUS_API_KEY}`,
       { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
     );
-    return res.json();
-  } else {
-    const res = await fetch(
-      `https://api.helius.xyz/v0/webhooks?api-key=${HELIUS_API_KEY}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-    );
-    const data = await res.json();
-    storage.webhookId = data.webhookID;
+    if (res.ok) {
+      console.log(`[HELIUS] Webhook updated OK (id=${storage.webhookId})`);
+      return;
+    }
+    // Stale / deleted — drop the old id and create a fresh one
+    console.warn(`[HELIUS] PUT failed (${res.status}) — webhook likely deleted, creating new one`);
+    storage.webhookId = null;
     saveStorage(storage);
-    console.log('Helius webhook created:', data.webhookID);
-    return data;
   }
+
+  // Create new webhook
+  const newId = await createHeliusWebhook(body);
+  storage.webhookId = newId;
+  saveStorage(storage);
+  console.log(`[HELIUS] Webhook created (id=${newId})`);
 }
 
 function getWebhookURL() {
@@ -680,7 +696,11 @@ bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
 });
 
 // /add — send "Add Token" button in the group
-bot.onText(/\/add(?:@\w+)?/, async (msg) => {
+bot.onText(/\/add/, async (msg) => {
+  // Ignore if tagged at a different bot
+  const tag = msg.text?.match(/^\/add@(\w+)/i)?.[1]?.toLowerCase();
+  if (tag && tag !== botUsername?.toLowerCase()) return;
+
   if (msg.chat.type === 'private') {
     await tgRequest('sendMessage', {
       chat_id: String(msg.chat.id),
@@ -701,7 +721,9 @@ bot.onText(/\/add(?:@\w+)?/, async (msg) => {
 });
 
 // /settings — show settings panel (works in group or DM)
-bot.onText(/\/settings(?:@\w+)?/, async (msg) => {
+bot.onText(/\/settings/, async (msg) => {
+  const tag = msg.text?.match(/^\/settings@(\w+)/i)?.[1]?.toLowerCase();
+  if (tag && tag !== botUsername?.toLowerCase()) return;
   const userId = String(msg.from.id);
   const chatId = String(msg.chat.id);
 
@@ -739,6 +761,34 @@ bot.onText(/\/cancel/, async (msg) => {
   if (msg.chat.type !== 'private') return;
   userStates.delete(String(msg.from.id));
   await tgRequest('sendMessage', { chat_id: String(msg.chat.id), text: '❌ Cancelled.' });
+});
+
+// /status — show system status (DM only)
+bot.onText(/\/status/, async (msg) => {
+  if (msg.chat.type !== 'private') return;
+  const chatId = String(msg.chat.id);
+  const storage = loadStorage();
+  const subs = storage.subscriptions;
+
+  const subLines = subs.length === 0
+    ? '  <i>No subscriptions</i>'
+    : subs.map((s) =>
+        `  • <b>${s.settings.tokenName || s.tokenMint.slice(0, 8) + '...'}</b>\n` +
+        `    chat: <code>${s.chatId}</code>\n` +
+        `    mint: <code>${s.tokenMint}</code>\n` +
+        `    active: ${s.settings.active === true ? '▶️ yes' : '⏸ no'}\n` +
+        `    minBuy: $${s.settings.minBuyUsd}`
+      ).join('\n');
+
+  const text =
+    `🐕 <b>Inu Buy Bot — Status</b>\n\n` +
+    `💾 Storage: <code>${STORAGE_FILE}</code>\n` +
+    `📡 Helius webhook ID: <code>${storage.webhookId || 'none'}</code>\n` +
+    `💰 SOL price: <b>$${solPriceUsd > 0 ? solPriceUsd.toFixed(2) : '(not loaded)'}</b>\n` +
+    `🌐 Webhook URL: <code>${getWebhookURL()}</code>\n\n` +
+    `<b>Subscriptions (${subs.length}):</b>\n${subLines}`;
+
+  await tgRequest('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML' });
 });
 
 // ─── Callback query handler (all button presses) ───────────────────────────────
@@ -1215,7 +1265,8 @@ async function registerBotCommands() {
   await tgRequest('setMyCommands', {
     commands: [
       { command: 'add',      description: 'Set up buy alerts in this group' },
-      { command: 'settings', description: 'Manage your token settings (DM only)' },
+      { command: 'settings', description: 'Manage your token settings' },
+      { command: 'status',   description: 'Show bot status & subscriptions (DM)' },
       { command: 'cancel',   description: 'Cancel current input (DM only)' },
       { command: 'start',    description: 'Show help' },
     ],
@@ -1226,6 +1277,14 @@ async function registerBotCommands() {
 // ─── Startup ───────────────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
+  console.log(`[STORAGE] File: ${STORAGE_FILE}`);
+
+  // Log what's in storage right now
+  const startupStorage = loadStorage();
+  console.log(`[STORAGE] Loaded ${startupStorage.subscriptions.length} subscription(s), webhookId=${startupStorage.webhookId || 'none'}`);
+  for (const s of startupStorage.subscriptions) {
+    console.log(`  ↳ chat=${s.chatId} mint=${s.tokenMint} active=${s.settings.active} name=${s.settings.tokenName}`);
+  }
 
   // Get bot username (needed for deep links in /add)
   try {
@@ -1244,8 +1303,7 @@ app.listen(PORT, async () => {
 
   try {
     await syncHeliusWebhook();
-    console.log('Helius webhook synced');
   } catch (e) {
-    console.error('Helius sync failed:', e.message);
+    console.error('[HELIUS] Sync failed:', e.message);
   }
 });
