@@ -172,9 +172,11 @@ function updatePosition(wallet, mint, usdSpent, tokensReceived) {
 const holderCache = new Map(); // mint → { count, ts }
 
 async function getHolderCount(mint) {
+  // Cache for 30 minutes — holder count changes slowly and this call costs credits
   const cached = holderCache.get(mint);
-  if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.count;
+  if (cached && Date.now() - cached.ts < 30 * 60 * 1000) return cached.count;
   try {
+    // Use Helius DAS getTokenAccounts (1 credit) instead of getProgramAccounts (100 credits)
     const res = await fetch(
       `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`,
       {
@@ -183,24 +185,19 @@ async function getHolderCount(mint) {
         body: JSON.stringify({
           jsonrpc: '2.0',
           id: 1,
-          method: 'getProgramAccounts',
-          params: [
-            'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
-            {
-              encoding: 'base64',
-              dataSlice: { offset: 0, length: 0 }, // no data, just count
-              filters: [
-                { dataSize: 165 },
-                { memcmp: { offset: 0, bytes: mint } },
-              ],
-            },
-          ],
+          method: 'getTokenAccounts',
+          params: {
+            page: 1,
+            limit: 1,
+            displayOptions: { showZeroBalance: false },
+            mint,
+          },
         }),
       }
     );
     const data = await res.json();
-    const count = data.result?.length ?? 0;
-    holderCache.set(mint, { count, ts: Date.now() });
+    const count = data.result?.total ?? null;
+    if (count != null) holderCache.set(mint, { count, ts: Date.now() });
     return count;
   } catch (e) {
     console.error('Holder count fetch failed:', e.message);
@@ -213,7 +210,7 @@ const mcapCache = new Map(); // mint → { mcap, ts }
 
 async function getMarketCap(mint) {
   const cached = mcapCache.get(mint);
-  if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.mcap;
+  if (cached && Date.now() - cached.ts < 15 * 60 * 1000) return cached.mcap;
   try {
     const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
     const data = await res.json();
