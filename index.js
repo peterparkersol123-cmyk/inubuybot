@@ -84,6 +84,21 @@ async function updateSolPrice() {
   console.error('All SOL price sources failed, keeping last value:', solPriceUsd);
 }
 
+// ─── Custom Emoji (SpyDefi_classic pack) ──────────────────────────────────────
+// Helper: wraps a custom emoji ID with a plain-text fallback
+const ce = (id, fallback) => `<tg-emoji emoji-id="${id}">${fallback}</tg-emoji>`;
+
+const CE = {
+  arrowRight : () => ce('5082729418380543512', '➡️'),   // green right arrow
+  arrowLeft  : () => ce('5050816424096826643', '⬅️'),   // green left arrow
+  whale      : () => ce('5051129106305909986', '🐋'),   // whale
+  buyer      : () => ce('5087015559518750311', '👤'),   // buyer / person
+  chart      : () => ce('5082455498251306031', '📈'),   // chart
+  mcap       : () => ce('5084645137003316287', '📊'),   // market cap
+  money      : () => ce('5084875076667442421', '💰'),   // money bag
+  holders    : () => ce('5179533127919338363', '📊'),   // holders (bar chart)
+};
+
 // ─── Formatting helpers ────────────────────────────────────────────────────────
 function formatUsd(amount) {
   if (amount >= 1e9) return `$${(amount / 1e9).toFixed(2)}B`;
@@ -314,28 +329,28 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
 
   // Header
   const header = isWhale
-    ? `🐋🐕 <b>WHALE BUY! WOOF WOOF!</b>`
+    ? `${CE.whale()}🐕 <b>WHALE BUY! WOOF WOOF!</b>`
     : `<b>${name} Buy!</b>`;
 
   // Market cap line — from DexScreener (auto), fallback to manual circSupply
   let mcapLine = '';
   if (marketCap != null) {
-    mcapLine = `📊 Market Cap: <b>${formatUsd(marketCap)}</b>\n`;
+    mcapLine = `${CE.mcap()} Market Cap: <b>${formatUsd(marketCap)}</b>\n`;
   } else if (s.circSupply > 0 && usdValue > 0 && tokenAmount > 0) {
     const pricePerToken = usdValue / tokenAmount;
-    mcapLine = `📊 Market Cap: <b>${formatUsd(pricePerToken * s.circSupply)}</b>\n`;
+    mcapLine = `${CE.mcap()} Market Cap: <b>${formatUsd(pricePerToken * s.circSupply)}</b>\n`;
   }
 
   // Price line
   let priceLine = '';
   if (s.showPrice && tokenAmount > 0 && usdValue > 0) {
     const pricePerToken = usdValue / tokenAmount;
-    priceLine = `💵 Price: <b>$${pricePerToken.toFixed(8)}</b>\n`;
+    priceLine = `${CE.money()} Price: <b>$${pricePerToken.toFixed(8)}</b>\n`;
   }
 
   // Holder count line
   const holderLine = holderCount != null
-    ? `🏠 Holders: <b>${holderCount.toLocaleString()}</b>\n`
+    ? `${CE.holders()} Holders: <b>${holderCount.toLocaleString()}</b>\n`
     : '';
 
   const chartUrl = `https://dexscreener.com/solana/${sub.tokenMint}`;
@@ -344,9 +359,9 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
   return (
     `${header}\n` +
     `${emojiRow}\n\n` +
-    `🔴 Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
-    `🟢 Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
-    `👤 <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | <a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
+    `${CE.arrowRight()} Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
+    `${CE.arrowLeft()} Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
+    `${CE.buyer()} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | ${CE.chart()}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
     priceLine +
     mcapLine +
     holderLine
