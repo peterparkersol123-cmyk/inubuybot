@@ -40,7 +40,7 @@ function saveSub(sub) {
 function defaultSettings() {
   return {
     gif: null,         // { fileId, type: 'photo'|'animation' } or null
-    minBuyUsd: 0,      // minimum buy in USD to trigger alert (0 = all)
+    minBuyUsd: 1,      // minimum buy in USD to trigger alert (default $1, 0 = all)
     emoji: '🐕',       // emoji shown in alert header (fallback text)
     emojiId: null,     // custom emoji ID if set via Telegram custom emoji
     stepUsd: 0,        // step size in USD — 1 emoji per step (0 = always 1 emoji)
@@ -562,14 +562,25 @@ async function sendSettingsPreview(dmChatId, sub) {
 
 async function sendBuyAlert(sub, tx, swap, tokenOut) {
   const s = sub.settings;
+  const sig = tx.signature?.slice(0, 12);
 
   // Skip if alerts are paused (active===false; undefined = legacy sub = treat as active)
-  if (s.active === false) return;
+  if (s.active === false) {
+    console.log(`[SKIP] tx=${sig} chat=${sub.chatId} reason=paused`);
+    return;
+  }
 
-  // Min buy filter
+  // Min buy filter — bypass entirely if SOL price hasn't loaded yet (avoids silent drops)
   const solSpent = swap.nativeInput ? swap.nativeInput.amount / 1e9 : 0;
-  const usdValue = solSpent * solPriceUsd;
-  if (s.minBuyUsd > 0 && usdValue < s.minBuyUsd) return;
+  const usdValue = solPriceUsd > 0 ? solSpent * solPriceUsd : 0;
+  if (s.minBuyUsd > 0) {
+    if (solPriceUsd === 0) {
+      console.warn(`[WARN] tx=${sig} chat=${sub.chatId} solPrice=0 — bypassing minBuy filter, sending alert anyway`);
+    } else if (usdValue < s.minBuyUsd) {
+      console.log(`[SKIP] tx=${sig} chat=${sub.chatId} reason=minBuy usd=$${usdValue.toFixed(2)} < min=$${s.minBuyUsd}`);
+      return;
+    }
+  }
 
   // Fetch holder count + market cap in parallel
   const [holderCount, marketCap] = await Promise.all([
@@ -1152,17 +1163,42 @@ app.post('/webhook', async (req, res) => {
   const transactions = req.body;
   if (!Array.isArray(transactions) || transactions.length === 0) return res.send('OK');
 
+  console.log(`[WEBHOOK] Received ${transactions.length} tx(s)`);
   const storage = loadStorage();
 
   for (const tx of transactions) {
-    if (tx.type !== 'SWAP') continue;
+    if (tx.type !== 'SWAP') {
+      console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} reason=type:${tx.type}`);
+      continue;
+    }
     const swap = tx.events?.swap;
-    if (!swap) continue;
+    if (!swap) {
+      console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} reason=no_swap_event`);
+      continue;
+    }
 
-    const tokenOut = swap.tokenOutputs?.find((t) =>
+    // Check top-level tokenOutputs first, then Jupiter innerSwaps
+    let tokenOut = swap.tokenOutputs?.find((t) =>
       storage.subscriptions.some((s) => s.tokenMint === t.mint)
     );
-    if (!tokenOut) continue;
+
+    if (!tokenOut && Array.isArray(swap.innerSwaps)) {
+      for (const inner of swap.innerSwaps) {
+        tokenOut = inner.tokenOutputs?.find((t) =>
+          storage.subscriptions.some((s) => s.tokenMint === t.mint)
+        );
+        if (tokenOut) {
+          console.log(`[INNER] Found token in innerSwaps for tx=${tx.signature?.slice(0, 12)}`);
+          break;
+        }
+      }
+    }
+
+    if (!tokenOut) {
+      const outMints = (swap.tokenOutputs || []).map((t) => t.mint?.slice(0, 8)).join(',');
+      console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} reason=no_matching_token outMints=[${outMints}]`);
+      continue;
+    }
 
     const matchingSubs = storage.subscriptions.filter((s) => s.tokenMint === tokenOut.mint);
 
@@ -1171,15 +1207,15 @@ app.post('/webhook', async (req, res) => {
       if (sub.settings.ignoreMev) {
         const receiver = tokenOut.userAccount;
         if (receiver && tx.feePayer && receiver !== tx.feePayer) {
-          console.log('Skipping potential MEV tx:', tx.signature);
+          console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} chat=${sub.chatId} reason=mev receiver=${receiver?.slice(0, 8)} feePayer=${tx.feePayer?.slice(0, 8)}`);
           continue;
         }
       }
       try {
         await sendBuyAlert(sub, tx, swap, tokenOut);
-        console.log(`Alert → chat ${sub.chatId} | tx ${tx.signature}`);
+        console.log(`[ALERT] → chat=${sub.chatId} tx=${tx.signature?.slice(0, 12)}`);
       } catch (err) {
-        console.error(`Alert failed for ${sub.chatId}:`, err.message);
+        console.error(`[ERROR] Alert failed chat=${sub.chatId}:`, err.message);
       }
     }
   }
