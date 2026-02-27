@@ -45,7 +45,6 @@ function defaultSettings() {
     emojiId: null,     // custom emoji ID if set via Telegram custom emoji
     stepUsd: 0,        // step size in USD — 1 emoji per step (0 = always 1 emoji)
     showPrice: false,  // show token price per unit in alert
-    ignoreMev: true,   // skip txs where feePayer !== token receiver
     whaleUsd: 50000,   // whale alert threshold in USD (0 = off)
     linkTg: '',        // project Telegram link shown as button in alert
     circSupply: 0,     // circulating supply for market cap calc
@@ -333,7 +332,6 @@ function buildSettingsKeyboard(sub) {
       ],
       [
         { text: s.showPrice ? '✅ Show Price' : '✗ Show Price',                      callback_data: `set_price:${c}` },
-        { text: s.ignoreMev ? '✅ Ignore MEVs' : '✗ Ignore MEVs',                   callback_data: `set_mev:${c}` },
       ],
       [
         { text: s.whaleUsd > 0 ? `🐋 Whale Alert $${s.whaleUsd} ✅` : '🐋 Whale Alerts', callback_data: `set_whale:${c}` },
@@ -858,12 +856,6 @@ bot.on('callback_query', async (query) => {
         await refreshSettings(dmChatId, msgId, sub);
         break;
 
-      case 'mev':
-        sub.settings.ignoreMev = !sub.settings.ignoreMev;
-        saveSub(sub);
-        await refreshSettings(dmChatId, msgId, sub);
-        break;
-
       case 'whale':
         if (sub.settings.whaleUsd > 0) {
           sub.settings.whaleUsd = 0;
@@ -1202,15 +1194,10 @@ app.post('/webhook', async (req, res) => {
 
     const matchingSubs = storage.subscriptions.filter((s) => s.tokenMint === tokenOut.mint);
 
+    // Log what we found so we can debug
+    console.log(`[MATCH] tx=${tx.signature?.slice(0, 12)} feePayer=${tx.feePayer?.slice(0, 8)} nativeInput.account=${swap.nativeInput?.account?.slice(0, 8)} tokenOut.userAccount=${tokenOut.userAccount?.slice(0, 8)} subs=${matchingSubs.length}`);
+
     for (const sub of matchingSubs) {
-      // Basic MEV filter: skip if fee payer ≠ token receiver
-      if (sub.settings.ignoreMev) {
-        const receiver = tokenOut.userAccount;
-        if (receiver && tx.feePayer && receiver !== tx.feePayer) {
-          console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} chat=${sub.chatId} reason=mev receiver=${receiver?.slice(0, 8)} feePayer=${tx.feePayer?.slice(0, 8)}`);
-          continue;
-        }
-      }
       try {
         await sendBuyAlert(sub, tx, swap, tokenOut);
         console.log(`[ALERT] → chat=${sub.chatId} tx=${tx.signature?.slice(0, 12)}`);
