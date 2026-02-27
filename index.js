@@ -50,6 +50,16 @@ function defaultSettings() {
     linkTg: '',        // project Telegram link shown as button in alert
     circSupply: 0,     // circulating supply for market cap calc
     tokenName: '',     // token symbol fetched from Helius metadata
+    icons: {           // per-field icon overrides { emoji, emojiId }
+      header:  { emoji: '🤑', emojiId: '5791791406137744300' },
+      whale:   { emoji: '🐋', emojiId: '5051129106305909986' },
+      spent:   { emoji: '➡️', emojiId: '5082729418380543512' },
+      got:     { emoji: '⬅️', emojiId: '5050816424096826643' },
+      buyer:   { emoji: '👤', emojiId: '5087015559518750311' },
+      chart:   { emoji: '📈', emojiId: '5082455498251306031' },
+      mcap:    { emoji: '📊', emojiId: '5084645137003316287' },
+      holders: { emoji: '📊', emojiId: '5179533127919338363' },
+    },
   };
 }
 
@@ -103,6 +113,24 @@ const CE = {
   money      : () => ce('5084875076667442421', '💰'),   // money bag
   holders    : () => ce('5179533127919338363', '📊'),   // holders (bar chart)
 };
+
+// Render a single icon field — custom emoji if emojiId set, else plain emoji
+function renderIcon(icon) {
+  if (!icon) return '';
+  return icon.emojiId
+    ? `<tg-emoji emoji-id="${icon.emojiId}">${icon.emoji}</tg-emoji>`
+    : icon.emoji;
+}
+
+// Merge saved icons with defaults so existing subs get all fields
+function getIcons(s) {
+  const d = defaultSettings().icons;
+  const saved = s.icons || {};
+  const fields = ['header', 'whale', 'spent', 'got', 'buyer', 'chart', 'mcap', 'holders'];
+  const result = {};
+  for (const f of fields) result[f] = saved[f] ?? d[f];
+  return result;
+}
 
 // ─── Formatting helpers ────────────────────────────────────────────────────────
 function formatUsd(amount) {
@@ -306,6 +334,9 @@ function buildSettingsKeyboard(sub) {
         { text: s.whaleUsd > 0 ? `🐋 Whale Alert $${s.whaleUsd} ✅` : '🐋 Whale Alerts', callback_data: `set_whale:${c}` },
       ],
       [
+        { text: '🎨 Customise Icons', callback_data: `set_icons:${c}` },
+      ],
+      [
         { text: '🗑️ Remove Token', callback_data: `set_remove:${c}` },
       ],
     ],
@@ -335,6 +366,64 @@ async function refreshSettings(chatId, messageId, sub) {
   }
 }
 
+// ─── Icons Sub-Panel ───────────────────────────────────────────────────────────
+const ICON_LABELS = {
+  header:  'Header',
+  whale:   'Whale',
+  spent:   'Spent',
+  got:     'Got',
+  buyer:   'Buyer',
+  chart:   'Chart',
+  mcap:    'Mkt Cap',
+  holders: 'Holders',
+};
+
+function buildIconsKeyboard(sub) {
+  const ic = getIcons(sub.settings);
+  const c  = sub.chatId;
+  return {
+    inline_keyboard: [
+      [
+        { text: `${ic.header.emoji} Header`,   callback_data: `icon_header:${c}` },
+        { text: `${ic.whale.emoji} Whale`,     callback_data: `icon_whale:${c}` },
+      ],
+      [
+        { text: `${ic.spent.emoji} Spent`,     callback_data: `icon_spent:${c}` },
+        { text: `${ic.got.emoji} Got`,         callback_data: `icon_got:${c}` },
+      ],
+      [
+        { text: `${ic.buyer.emoji} Buyer`,     callback_data: `icon_buyer:${c}` },
+        { text: `${ic.chart.emoji} Chart`,     callback_data: `icon_chart:${c}` },
+      ],
+      [
+        { text: `${ic.mcap.emoji} Mkt Cap`,    callback_data: `icon_mcap:${c}` },
+        { text: `${ic.holders.emoji} Holders`, callback_data: `icon_holders:${c}` },
+      ],
+      [
+        { text: '← Back', callback_data: `back_settings:${c}` },
+      ],
+    ],
+  };
+}
+
+async function showIcons(chatId, msgId, sub) {
+  const name = sub.settings.tokenName || sub.tokenMint.slice(0, 8) + '...';
+  const text = `🎨 <b>Icon Settings — ${name}</b>\n\nTap any icon to change it.\nYou can use any standard or custom emoji.`;
+  try {
+    await tgRequest('editMessageText', {
+      chat_id: chatId, message_id: msgId,
+      text, parse_mode: 'HTML',
+      reply_markup: buildIconsKeyboard(sub),
+    });
+  } catch {
+    await tgRequest('sendMessage', {
+      chat_id: chatId,
+      text, parse_mode: 'HTML',
+      reply_markup: buildIconsKeyboard(sub),
+    });
+  }
+}
+
 // ─── Alert Builder ─────────────────────────────────────────────────────────────
 function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prevPosition) {
   const s = sub.settings;
@@ -356,18 +445,21 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
     : s.emoji;
   const emojiRow = Array(stepCount).fill(singleEmoji).join('');
 
+  // Resolve per-field icons
+  const icons = getIcons(s);
+
   // Header
   const header = isWhale
-    ? `${CE.whale()}${CE.buy()} <b>WHALE BUY! WOOF WOOF!</b>`
-    : `${CE.buy()} <b>${name} Buy!</b>`;
+    ? `${renderIcon(icons.whale)}${renderIcon(icons.header)} <b>WHALE BUY! WOOF WOOF!</b>`
+    : `${renderIcon(icons.header)} <b>${name} Buy!</b>`;
 
   // Market cap line — from DexScreener (auto), fallback to manual circSupply
   let mcapLine = '';
   if (marketCap != null) {
-    mcapLine = `${CE.mcap()} Market Cap: <b>${formatUsd(marketCap)}</b>\n`;
+    mcapLine = `${renderIcon(icons.mcap)} Market Cap: <b>${formatUsd(marketCap)}</b>\n`;
   } else if (s.circSupply > 0 && usdValue > 0 && tokenAmount > 0) {
     const pricePerToken = usdValue / tokenAmount;
-    mcapLine = `${CE.mcap()} Market Cap: <b>${formatUsd(pricePerToken * s.circSupply)}</b>\n`;
+    mcapLine = `${renderIcon(icons.mcap)} Market Cap: <b>${formatUsd(pricePerToken * s.circSupply)}</b>\n`;
   }
 
   // Price line
@@ -379,7 +471,7 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
 
   // Holder count line
   const holderLine = holderCount != null
-    ? `${CE.holders()} Holders: <b>${holderCount.toLocaleString()}</b>\n`
+    ? `${renderIcon(icons.holders)} Holders: <b>${holderCount.toLocaleString()}</b>\n`
     : '';
 
   // Position / PnL line
@@ -388,12 +480,12 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
     if (!prevPosition) {
       positionLine = `🆕 <b>New Position</b>\n`;
     } else {
-      const avgBuyPrice    = prevPosition.totalSpentUsd / prevPosition.totalTokens;
-      const currentPrice   = usdValue / tokenAmount;
-      const pnlPct         = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100;
-      const sign           = pnlPct >= 0 ? '+' : '';
-      const icon           = pnlPct >= 0 ? '📈' : '📉';
-      positionLine = `${icon} Position: <b>${sign}${pnlPct.toFixed(1)}%</b>\n`;
+      const avgBuyPrice  = prevPosition.totalSpentUsd / prevPosition.totalTokens;
+      const currentPrice = usdValue / tokenAmount;
+      const pnlPct       = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100;
+      const sign         = pnlPct >= 0 ? '+' : '';
+      const pnlIcon      = pnlPct >= 0 ? '📈' : '📉';
+      positionLine = `${pnlIcon} Position: <b>${sign}${pnlPct.toFixed(1)}%</b>\n`;
     }
   }
 
@@ -403,9 +495,9 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
   return (
     `${header}\n` +
     `${emojiRow}\n\n` +
-    `${CE.arrowRight()} Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
-    `${CE.arrowLeft()} Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
-    `${CE.buyer()} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | ${CE.chart()}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
+    `${renderIcon(icons.spent)} Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
+    `${renderIcon(icons.got)} Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
+    `${renderIcon(icons.buyer)} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | ${renderIcon(icons.chart)}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>\n` +
     positionLine +
     priceLine +
     mcapLine +
@@ -731,6 +823,10 @@ bot.on('callback_query', async (query) => {
         });
         break;
 
+      case 'icons':
+        await showIcons(dmChatId, msgId, sub);
+        break;
+
       case 'remove':
         await tgRequest('editMessageText', {
           chat_id: dmChatId,
@@ -772,6 +868,27 @@ bot.on('callback_query', async (query) => {
     await tgRequest('answerCallbackQuery', { callback_query_id: query.id });
     const sub = findSub(groupChatId);
     if (sub) await refreshSettings(dmChatId, msgId, sub);
+    return;
+  }
+
+  // ── Icon field buttons (from icons sub-panel) ──
+  if (data.startsWith('icon_')) {
+    const colonIdx    = data.indexOf(':');
+    const field       = data.slice(5, colonIdx);       // e.g. 'header', 'spent'
+    const groupChatId = data.slice(colonIdx + 1);
+    await tgRequest('answerCallbackQuery', { callback_query_id: query.id });
+    const sub = findSub(groupChatId);
+    if (!sub) return;
+    const ic = getIcons(sub.settings);
+    userStates.set(userId, { step: `awaiting_icon_${field}:${groupChatId}`, msgId });
+    await tgRequest('sendMessage', {
+      chat_id: dmChatId,
+      text:
+        `🎨 <b>Change ${ICON_LABELS[field] || field} icon</b>\n\n` +
+        `Send any emoji or custom emoji.\n` +
+        `Current: ${ic[field]?.emoji || '?'}\n\n/cancel to abort.`,
+      parse_mode: 'HTML',
+    });
     return;
   }
 });
@@ -835,6 +952,28 @@ bot.on('message', async (msg) => {
   }
 
   let error = null;
+
+  // ── Icon field input ──
+  if (action.startsWith('icon_')) {
+    const field = action.slice(5); // e.g. 'header'
+    if (!sub.settings.icons) sub.settings.icons = {};
+    const customEntity = msg.entities?.find(e => e.type === 'custom_emoji');
+    if (customEntity) {
+      const fallback = msg.text?.slice(customEntity.offset, customEntity.offset + customEntity.length) || '❓';
+      sub.settings.icons[field] = { emoji: fallback, emojiId: customEntity.custom_emoji_id };
+    } else {
+      const e = msg.text?.trim();
+      if (!e) {
+        await tgRequest('sendMessage', { chat_id: dmChatId, text: '❌ Please send an emoji.' });
+        return;
+      }
+      sub.settings.icons[field] = { emoji: e, emojiId: null };
+    }
+    saveSub(sub);
+    userStates.delete(userId);
+    await showIcons(dmChatId, msgId, sub);
+    return;
+  }
 
   switch (action) {
     case 'gif':
