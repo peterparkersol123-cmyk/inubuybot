@@ -41,7 +41,8 @@ function defaultSettings() {
   return {
     gif: null,         // { fileId, type: 'photo'|'animation' } or null
     minBuyUsd: 0,      // minimum buy in USD to trigger alert (0 = all)
-    emoji: '🐕',       // emoji shown in alert header
+    emoji: '🐕',       // emoji shown in alert header (fallback text)
+    emojiId: null,     // custom emoji ID if set via Telegram custom emoji
     stepUsd: 0,        // step size in USD (stored, future use)
     showPrice: false,  // show token price per unit in alert
     ignoreMev: true,   // skip txs where feePayer !== token receiver
@@ -329,7 +330,10 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap) {
 
   // Emoji row — repeat emoji based on step size, capped at 20
   const stepCount = s.stepUsd > 0 ? Math.min(Math.max(Math.floor(usdValue / s.stepUsd), 1), 20) : 1;
-  const emojiRow = Array(stepCount).fill(s.emoji).join('');
+  const singleEmoji = s.emojiId
+    ? `<tg-emoji emoji-id="${s.emojiId}">${s.emoji}</tg-emoji>`
+    : s.emoji;
+  const emojiRow = Array(stepCount).fill(singleEmoji).join('');
 
   // Header
   const header = isWhale
@@ -804,9 +808,18 @@ bot.on('message', async (msg) => {
     }
 
     case 'emoji': {
-      const e = msg.text?.trim();
-      if (!e) { error = '❌ Please send an emoji.'; break; }
-      sub.settings.emoji = e;
+      // Custom emoji come in via entities, not msg.text
+      const customEntity = msg.entities?.find(e => e.type === 'custom_emoji');
+      if (customEntity) {
+        const fallback = msg.text?.slice(customEntity.offset, customEntity.offset + customEntity.length) || '🐕';
+        sub.settings.emoji   = fallback;
+        sub.settings.emojiId = customEntity.custom_emoji_id;
+      } else {
+        const e = msg.text?.trim();
+        if (!e) { error = '❌ Please send an emoji.'; break; }
+        sub.settings.emoji   = e;
+        sub.settings.emojiId = null;
+      }
       break;
     }
 
