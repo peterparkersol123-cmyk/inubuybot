@@ -168,35 +168,33 @@ function updatePosition(wallet, mint, usdSpent, tokensReceived) {
   }
 }
 
-// ─── Holder Count (cached, 5-min TTL) ─────────────────────────────────────────
+// ─── Seen-signature dedup (shared by polling + legacy webhook endpoint) ───────
+const seenSignatures = new Set();
+function markSeen(sig) {
+  seenSignatures.add(sig);
+  // Keep newest ~5 000 sigs; drop oldest half when over limit
+  if (seenSignatures.size > 5000) {
+    const it = seenSignatures.values();
+    for (let i = 0; i < 2500; i++) seenSignatures.delete(it.next().value);
+  }
+}
+
+// ─── Holder Count (cached, 30-min TTL) ────────────────────────────────────────
 const holderCache = new Map(); // mint → { count, ts }
 
 async function getHolderCount(mint) {
-  // Cache for 30 minutes — holder count changes slowly and this call costs credits
+  // Cache for 30 minutes — holder count changes slowly
   const cached = holderCache.get(mint);
   if (cached && Date.now() - cached.ts < 30 * 60 * 1000) return cached.count;
   try {
-    // Use Helius DAS getTokenAccounts (1 credit) instead of getProgramAccounts (100 credits)
+    // Solscan public API — completely free, no API key, returns real holder total
     const res = await fetch(
-      `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getTokenAccounts',
-          params: {
-            page: 1,
-            limit: 1,
-            displayOptions: { showZeroBalance: false },
-            mint,
-          },
-        }),
-      }
+      `https://public-api.solscan.io/token/holders?tokenAddress=${mint}&limit=10&offset=0`,
+      { headers: { 'Accept': 'application/json' } }
     );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const count = data.result?.total ?? null;
+    const count = typeof data?.total === 'number' ? data.total : null;
     if (count != null) holderCache.set(mint, { count, ts: Date.now() });
     return count;
   } catch (e) {
@@ -229,6 +227,19 @@ async function getMarketCap(mint) {
 
 // ─── Token Metadata ────────────────────────────────────────────────────────────
 async function getTokenName(mint) {
+  // 1. DexScreener — completely free, already used for market cap
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+    const data = await res.json();
+    const pairs = data?.pairs;
+    if (pairs?.length > 0) {
+      const best = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+      const symbol = best?.baseToken?.symbol;
+      if (symbol) return symbol;
+    }
+  } catch (e) { /* fall through */ }
+
+  // 2. Helius token metadata — fallback (costs credits)
   try {
     const res = await fetch(
       `https://api.helius.xyz/v0/token-metadata?api-key=${HELIUS_API_KEY}`,
@@ -302,6 +313,72 @@ async function syncHeliusWebhook() {
 function getWebhookURL() {
   if (RAILWAY_PUBLIC_DOMAIN) return `https://${RAILWAY_PUBLIC_DOMAIN}/webhook`;
   return `http://localhost:${PORT}/webhook`;
+}
+
+// ─── Core transaction processor (used by both polling and legacy webhook) ─────
+async function processTransaction(tx, storage) {
+  if (tx.type !== 'SWAP') return;
+  const swap = tx.events?.swap;
+  if (!swap) return;
+
+  // Check top-level tokenOutputs, then Jupiter innerSwaps
+  let tokenOut = swap.tokenOutputs?.find((t) =>
+    storage.subscriptions.some((s) => s.tokenMint === t.mint)
+  );
+  if (!tokenOut && Array.isArray(swap.innerSwaps)) {
+    for (const inner of swap.innerSwaps) {
+      tokenOut = inner.tokenOutputs?.find((t) =>
+        storage.subscriptions.some((s) => s.tokenMint === t.mint)
+      );
+      if (tokenOut) break;
+    }
+  }
+  if (!tokenOut) return;
+
+  const matchingSubs = storage.subscriptions.filter((s) => s.tokenMint === tokenOut.mint);
+  for (const sub of matchingSubs) {
+    try {
+      await sendBuyAlert(sub, tx, swap, tokenOut);
+      console.log(`[ALERT] → chat=${sub.chatId} tx=${tx.signature?.slice(0, 12)}`);
+    } catch (err) {
+      console.error(`[ERROR] chat=${sub.chatId}:`, err.message);
+    }
+  }
+}
+
+// ─── Polling (replaces Helius webhook event billing) ──────────────────────────
+// Poll the Helius enhanced-transaction history API on a fixed schedule.
+// Cost: ~10 credits × 480 calls/day = 4 800 credits/day regardless of token activity.
+// For active tokens (>240 buys/day) this is cheaper than paying per webhook event.
+const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+
+async function pollForSwaps() {
+  const storage = loadStorage();
+  const mints = getUniqueMints(storage);
+  if (mints.length === 0) return;
+
+  for (const mint of mints) {
+    try {
+      const res = await fetch(
+        `https://api.helius.xyz/v0/addresses/${mint}/transactions` +
+        `?api-key=${HELIUS_API_KEY}&type=SWAP&limit=20`
+      );
+      if (!res.ok) { console.warn(`[POLL] ${res.status} for ${mint.slice(0, 8)}`); continue; }
+      const txs = await res.json();
+      if (!Array.isArray(txs)) continue;
+
+      let newCount = 0;
+      for (const tx of txs) {
+        if (!tx.signature || seenSignatures.has(tx.signature)) continue;
+        markSeen(tx.signature);
+        newCount++;
+        await processTransaction(tx, storage);
+      }
+      if (newCount > 0) console.log(`[POLL] ${mint.slice(0, 8)} +${newCount} new tx(s)`);
+    } catch (e) {
+      console.error(`[POLL] Error for ${mint.slice(0, 8)}:`, e.message);
+    }
+  }
 }
 
 // ─── Telegram API helper ───────────────────────────────────────────────────────
@@ -590,6 +667,17 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
     } else if (usdValue < s.minBuyUsd) {
       console.log(`[SKIP] tx=${sig} chat=${sub.chatId} reason=minBuy usd=$${usdValue.toFixed(2)} < min=$${s.minBuyUsd}`);
       return;
+    }
+  }
+
+  // Auto-refresh token name if it's still showing a truncated address
+  if (!s.tokenName || s.tokenName.endsWith('...')) {
+    const fresh = await getTokenName(sub.tokenMint);
+    if (fresh && !fresh.endsWith('...')) {
+      sub.settings.tokenName = fresh;
+      s.tokenName = fresh;
+      saveSub(sub);
+      console.log(`[NAME] Refreshed token name → ${fresh}`);
     }
   }
 
@@ -976,7 +1064,7 @@ bot.on('callback_query', async (query) => {
     const storage = loadStorage();
     storage.subscriptions = storage.subscriptions.filter((s) => s.chatId !== groupChatId);
     saveStorage(storage);
-    try { await syncHeliusWebhook(); } catch (e) { console.error('Helius sync error:', e.message); }
+    // (no Helius webhook sync needed — polling discovers new mints automatically)
     await tgRequest('editMessageText', {
       chat_id: dmChatId,
       message_id: msgId,
@@ -1053,7 +1141,7 @@ bot.on('message', async (msg) => {
     storage.subscriptions.push(sub);
     saveStorage(storage);
 
-    try { await syncHeliusWebhook(); } catch (e) { console.error('Helius sync error:', e.message); }
+    // (no Helius webhook sync needed — polling discovers new mints automatically)
 
     await tgRequest('sendMessage', {
       chat_id: dmChatId,
@@ -1192,69 +1280,22 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.send('Solana Buy Alert Bot is running!'));
 
+// Legacy webhook endpoint — kept as a fallback in case Helius still delivers events
+// for a while after the webhook is deleted. Polling is now the primary mechanism.
 app.post('/webhook', async (req, res) => {
   const authHeader = req.headers['authorization'];
-  if (authHeader !== AUTH_TOKEN) {
-    console.warn('Unauthorized webhook attempt');
-    return res.status(401).send('Unauthorized');
-  }
+  if (authHeader !== AUTH_TOKEN) return res.status(401).send('Unauthorized');
+  res.send('OK'); // respond immediately so Helius doesn't retry
 
   const transactions = req.body;
-  if (!Array.isArray(transactions) || transactions.length === 0) return res.send('OK');
-
-  console.log(`[WEBHOOK] Received ${transactions.length} tx(s)`);
+  if (!Array.isArray(transactions)) return;
   const storage = loadStorage();
-
   for (const tx of transactions) {
-    if (tx.type !== 'SWAP') {
-      console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} reason=type:${tx.type}`);
-      continue;
-    }
-    const swap = tx.events?.swap;
-    if (!swap) {
-      console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} reason=no_swap_event`);
-      continue;
-    }
-
-    // Check top-level tokenOutputs first, then Jupiter innerSwaps
-    let tokenOut = swap.tokenOutputs?.find((t) =>
-      storage.subscriptions.some((s) => s.tokenMint === t.mint)
-    );
-
-    if (!tokenOut && Array.isArray(swap.innerSwaps)) {
-      for (const inner of swap.innerSwaps) {
-        tokenOut = inner.tokenOutputs?.find((t) =>
-          storage.subscriptions.some((s) => s.tokenMint === t.mint)
-        );
-        if (tokenOut) {
-          console.log(`[INNER] Found token in innerSwaps for tx=${tx.signature?.slice(0, 12)}`);
-          break;
-        }
-      }
-    }
-
-    if (!tokenOut) {
-      const outMints = (swap.tokenOutputs || []).map((t) => t.mint?.slice(0, 8)).join(',');
-      console.log(`[SKIP] tx=${tx.signature?.slice(0, 12)} reason=no_matching_token outMints=[${outMints}]`);
-      continue;
-    }
-
-    const matchingSubs = storage.subscriptions.filter((s) => s.tokenMint === tokenOut.mint);
-
-    // Log what we found so we can debug
-    console.log(`[MATCH] tx=${tx.signature?.slice(0, 12)} feePayer=${tx.feePayer?.slice(0, 8)} nativeInput.account=${swap.nativeInput?.account?.slice(0, 8)} tokenOut.userAccount=${tokenOut.userAccount?.slice(0, 8)} subs=${matchingSubs.length}`);
-
-    for (const sub of matchingSubs) {
-      try {
-        await sendBuyAlert(sub, tx, swap, tokenOut);
-        console.log(`[ALERT] → chat=${sub.chatId} tx=${tx.signature?.slice(0, 12)}`);
-      } catch (err) {
-        console.error(`[ERROR] Alert failed chat=${sub.chatId}:`, err.message);
-      }
-    }
+    if (!tx.signature || seenSignatures.has(tx.signature)) continue;
+    markSeen(tx.signature);
+    console.log(`[WEBHOOK] Processing tx=${tx.signature?.slice(0, 12)}`);
+    await processTransaction(tx, storage);
   }
-
-  res.send('OK');
 });
 
 // ─── Register bot commands ─────────────────────────────────────────────────────
@@ -1298,9 +1339,44 @@ app.listen(PORT, async () => {
   await updateSolPrice();
   setInterval(updateSolPrice, 2 * 60 * 1000);
 
-  try {
-    await syncHeliusWebhook();
-  } catch (e) {
-    console.error('[HELIUS] Sync failed:', e.message);
+  // ── Delete existing Helius webhook so we stop being billed per-event ──────
+  if (startupStorage.webhookId) {
+    try {
+      const delRes = await fetch(
+        `https://api.helius.xyz/v0/webhooks/${startupStorage.webhookId}?api-key=${HELIUS_API_KEY}`,
+        { method: 'DELETE' }
+      );
+      if (delRes.ok) {
+        console.log(`[HELIUS] Webhook deleted (id=${startupStorage.webhookId}) — switching to polling`);
+        startupStorage.webhookId = null;
+        saveStorage(startupStorage);
+      } else {
+        console.warn(`[HELIUS] Could not delete webhook: HTTP ${delRes.status}`);
+      }
+    } catch (e) {
+      console.error('[HELIUS] Webhook delete error:', e.message);
+    }
   }
+
+  // ── Seed seen-signatures so we don't re-alert on old txs after restart ───
+  const initMints = getUniqueMints(startupStorage);
+  for (const mint of initMints) {
+    try {
+      const res = await fetch(
+        `https://api.helius.xyz/v0/addresses/${mint}/transactions` +
+        `?api-key=${HELIUS_API_KEY}&type=SWAP&limit=10`
+      );
+      if (res.ok) {
+        const txs = await res.json();
+        if (Array.isArray(txs)) txs.forEach((t) => t.signature && seenSignatures.add(t.signature));
+      }
+    } catch (e) { /* non-fatal */ }
+  }
+  console.log(`[POLL] Seeded ${seenSignatures.size} recent signature(s)`);
+
+  // ── Start polling loop ────────────────────────────────────────────────────
+  setInterval(pollForSwaps, POLL_INTERVAL_MS);
+  console.log(`[POLL] Started — interval=${POLL_INTERVAL_MS / 1000}s`);
+  // Run first poll immediately (after a short delay so everything else is ready)
+  setTimeout(pollForSwaps, 5000);
 });
