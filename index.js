@@ -965,11 +965,11 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
   const chartUrl = `https://dexscreener.com/solana/${sub.tokenMint}`;
   const buyUrl   = `https://jup.ag/swap/SOL-${sub.tokenMint}`;
 
-  // Links line at the bottom — custom links if set, else default Chart | Buy
+  // Links — only shown if the user has set custom links
   const customLinks = (s.links || []).filter(l => l?.url && l?.label);
   const linksStr = customLinks.length > 0
     ? customLinks.map(l => `<a href="${l.url}">${l.label}</a>`).join(' | ')
-    : `${renderIcon(icons.chart)}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>`;
+    : '';
 
   const statsBlock = priceLine + mcapLine + holderLine;
 
@@ -982,8 +982,7 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
     `${renderIcon(icons.buyer)} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a>\n` +
     positionLine +
     (statsBlock ? `\n${statsBlock}` : '') +
-    `\n` +
-    linksStr + '\n'
+    (linksStr ? `\n${linksStr}\n` : '')
   );
 }
 
