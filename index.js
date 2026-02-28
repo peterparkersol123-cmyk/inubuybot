@@ -198,7 +198,7 @@ async function getHolderCount(mint) {
     // Rugcheck API — free, no API key, returns totalHolders for most Solana tokens
     const res = await fetch(
       `https://api.rugcheck.xyz/v1/tokens/${mint}/report`,
-      { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(6000) }
+      { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(12000) }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -933,16 +933,18 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
     ? customLinks.map(l => `<a href="${l.url}">${l.label}</a>`).join(' | ')
     : `${renderIcon(icons.chart)}<a href="${chartUrl}">Chart</a> | <a href="${buyUrl}">Buy</a>`;
 
+  const statsBlock = priceLine + mcapLine + holderLine;
+
   return (
     `${header}\n` +
     `${emojiRow}\n\n` +
     `${renderIcon(icons.spent)} Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
     `${renderIcon(icons.got)} Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
+    `\n` +
     `${renderIcon(icons.buyer)} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a>\n` +
     positionLine +
-    priceLine +
-    mcapLine +
-    holderLine +
+    (statsBlock ? `\n${statsBlock}` : '') +
+    `\n` +
     linksStr + '\n'
   );
 }
