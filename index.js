@@ -741,7 +741,7 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
   // Header
   const header = isWhale
     ? `${renderIcon(icons.whale)}${renderIcon(icons.header)} <b>WHALE BUY! WOOF WOOF!</b>`
-    : `${renderIcon(icons.header)} <b>${name} Buy!</b>`;
+    : `<b>${name} Buy!</b>`;
 
   // Market cap line — from DexScreener (auto), fallback to manual circSupply
   let mcapLine = '';
