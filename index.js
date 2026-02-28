@@ -463,7 +463,7 @@ async function fetchSigsForAddress(mint, limit = 20) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (Array.isArray(data.result)) return data.result.map(s => s.signature);
+      if (Array.isArray(data.result)) return data.result; // full objects: { signature, blockTime, err, ... }
     } catch (e) {
       console.warn(`[RPC] getSignaturesForAddress failed: ${e.message}`);
     }
@@ -565,18 +565,31 @@ function parseSwapFromRaw(rawTx, monitoredMints) {
 
 // ─── Polling — safety net for WS gaps ─────────────────────────────────────────
 const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 min
+// Transactions older than this are skipped by the polling loop.
+// Prevents re-alerting on old txs when the bot restarts and seenSignatures is empty.
+const POLL_MAX_AGE_MS  = 10 * 60 * 1000; // 10 min
 
 async function pollForSwaps() {
   const storage = loadStorage();
   const mints = getUniqueMints(storage);
   if (mints.length === 0) return;
 
+  const cutoffTime = Math.floor((Date.now() - POLL_MAX_AGE_MS) / 1000); // unix seconds
+
   for (const mint of mints) {
     try {
-      const sigs = await fetchSigsForAddress(mint, 20);
+      const sigObjs = await fetchSigsForAddress(mint, 20);
       let newCount = 0;
-      for (const sig of sigs) {
+      for (const { signature: sig, blockTime } of sigObjs) {
         if (!sig || seenSignatures.has(sig) || pendingSigs.has(sig)) continue;
+
+        // Skip (and silence) transactions older than the cutoff window.
+        // This is the main guard against duplicate alerts after a restart.
+        if (blockTime != null && blockTime < cutoffTime) {
+          markSeen(sig); // won't check again
+          continue;
+        }
+
         markSeen(sig);
         newCount++;
         const rawTx = await fetchRawTx(sig);
@@ -1889,8 +1902,8 @@ app.listen(PORT, async () => {
   const initMints = getUniqueMints(startupStorage);
   for (const mint of initMints) {
     try {
-      const sigs = await fetchSigsForAddress(mint, 10);
-      sigs.forEach(sig => sig && seenSignatures.add(sig));
+      const sigs = await fetchSigsForAddress(mint, 50); // 50 covers ~15 min of typical activity
+      sigs.forEach(o => o?.signature && seenSignatures.add(o.signature));
     } catch (e) { /* non-fatal */ }
   }
   console.log(`[POLL] Seeded ${seenSignatures.size} recent signature(s)`);
