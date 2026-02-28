@@ -169,6 +169,10 @@ function updatePosition(wallet, mint, usdSpent, tokensReceived) {
   }
 }
 
+// Unix timestamp (seconds) of when this process started.
+// Any transaction confirmed before this moment is ignored — we only alert on new buys.
+const BOT_START_TIME = Math.floor(Date.now() / 1000);
+
 // ─── Seen-signature dedup (shared by polling + legacy webhook endpoint) ───────
 const seenSignatures = new Set();
 function markSeen(sig) {
@@ -565,16 +569,11 @@ function parseSwapFromRaw(rawTx, monitoredMints) {
 
 // ─── Polling — safety net for WS gaps ─────────────────────────────────────────
 const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 min
-// Transactions older than this are skipped by the polling loop.
-// Prevents re-alerting on old txs when the bot restarts and seenSignatures is empty.
-const POLL_MAX_AGE_MS  = 10 * 60 * 1000; // 10 min
 
 async function pollForSwaps() {
   const storage = loadStorage();
   const mints = getUniqueMints(storage);
   if (mints.length === 0) return;
-
-  const cutoffTime = Math.floor((Date.now() - POLL_MAX_AGE_MS) / 1000); // unix seconds
 
   for (const mint of mints) {
     try {
@@ -583,10 +582,10 @@ async function pollForSwaps() {
       for (const { signature: sig, blockTime } of sigObjs) {
         if (!sig || seenSignatures.has(sig) || pendingSigs.has(sig)) continue;
 
-        // Skip (and silence) transactions older than the cutoff window.
-        // This is the main guard against duplicate alerts after a restart.
-        if (blockTime != null && blockTime < cutoffTime) {
-          markSeen(sig); // won't check again
+        // Only process transactions confirmed at or after bot startup.
+        // This is the definitive guard against re-alerting on old buys after any restart.
+        if (blockTime != null && blockTime < BOT_START_TIME) {
+          markSeen(sig); // silence permanently so we never loop over it again
           continue;
         }
 
@@ -718,6 +717,14 @@ function startWsForMint(mint) {
 
       try {
         const rawTx = await fetchRawTxQueued(signature);
+
+        // Guard: ignore any transaction confirmed before this process started.
+        if (rawTx?.blockTime != null && rawTx.blockTime < BOT_START_TIME) {
+          markSeen(signature);
+          console.log(`[WS] tx ${signature.slice(0, 12)} pre-dates startup — skipping`);
+          return;
+        }
+
         const tx = rawTx ? parseSwapFromRaw(rawTx, [mint]) : null;
         if (tx) {
           markSeen(signature);
