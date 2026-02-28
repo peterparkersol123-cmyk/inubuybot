@@ -517,6 +517,17 @@ function parseSwapFromRaw(rawTx, monitoredMints) {
   }
   if (!tokenOut) return null; // sell, LP action, or unrelated tx
 
+  // Verify tokens came from a pool/vault — at least one OTHER account's balance
+  // for the same mint must have decreased. This rules out LP fee claims, airdrops
+  // embedded in DEX transactions, reward harvests, and any non-purchase token receipt.
+  const poolGaveTokens = postBals.some(b => {
+    if (b.mint !== tokenOut.mint || b.owner === buyer) return false; // skip buyer's own account
+    const pre = preMap[b.accountIndex];
+    if (!pre) return false; // account didn't exist before — can't have given tokens
+    return BigInt(pre.uiTokenAmount.amount) > BigInt(b.uiTokenAmount.amount);
+  });
+  if (!poolGaveTokens) return null;
+
   // SOL spent = fee payer balance decrease minus tx fee
   const solLamports = Math.max(
     0,
