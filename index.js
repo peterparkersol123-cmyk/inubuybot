@@ -763,7 +763,11 @@ async function tgRequest(method, body) {
     body: JSON.stringify(body),
   });
   const data = await res.json();
-  if (!data.ok) throw new Error(`TG ${method} failed: ${JSON.stringify(data)}`);
+  if (!data.ok) {
+    // Telegram returns 400 when editMessageText is called with identical content — not a real error
+    if (data.description?.includes('message is not modified')) return data.result;
+    throw new Error(`TG ${method} failed: ${JSON.stringify(data)}`);
+  }
   return data.result;
 }
 
