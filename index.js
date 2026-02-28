@@ -1013,9 +1013,11 @@ async function sendSettingsPreview(dmChatId, sub) {
     rawTokenAmount: { tokenAmount: mockRawAmt, decimals: mockDecimals },
   };
 
-  // Use cached data if available, else show plausible placeholders
-  const marketCap  = mcapCache.get(sub.tokenMint)?.mcap ?? null;
-  const holderCount = holderCache.get(sub.tokenMint)?.count ?? null;
+  // Fetch live market cap and holder count for the preview
+  const [marketCap, holderCount] = await Promise.all([
+    getMarketCap(sub.tokenMint),
+    getHolderCount(sub.tokenMint),
+  ]);
 
   const message = buildAlertMessage(sub, mockTx, mockSwap, mockTokenOut, holderCount, marketCap, null);
   const preview = `👁 <i>Preview — not a real buy</i>\n\n` + message;
