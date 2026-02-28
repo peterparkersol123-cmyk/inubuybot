@@ -52,14 +52,14 @@ function defaultSettings() {
     tokenName: '',     // token symbol fetched from Helius metadata
     active: false,     // whether alerts are currently enabled (must be started manually)
     icons: {           // per-field icon overrides { emoji, emojiId }
-      header:  { emoji: '🤑', emojiId: '5791791406137744300' },
-      whale:   { emoji: '🐋', emojiId: '5051129106305909986' },
-      spent:   { emoji: '➡️', emojiId: '5082729418380543512' },
-      got:     { emoji: '⬅️', emojiId: '5050816424096826643' },
-      buyer:   { emoji: '👤', emojiId: '5087015559518750311' },
-      chart:   { emoji: '📈', emojiId: '5082455498251306031' },
-      mcap:    { emoji: '📊', emojiId: '5084645137003316287' },
-      holders: { emoji: '📊', emojiId: '5179533127919338363' },
+      header:  { emoji: '🤑', emojiId: null },
+      whale:   { emoji: '🐋', emojiId: null },
+      spent:   { emoji: '🤑', emojiId: null },
+      got:     { emoji: '💰', emojiId: null },
+      buyer:   { emoji: '💳', emojiId: null },
+      chart:   { emoji: '📈', emojiId: null },
+      mcap:    { emoji: '📊', emojiId: null },
+      holders: { emoji: '💠', emojiId: null },
     },
   };
 }
