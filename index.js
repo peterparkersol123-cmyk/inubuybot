@@ -195,14 +195,16 @@ async function getHolderCount(mint) {
   const cached = holderCache.get(mint);
   if (cached && Date.now() - cached.ts < 30 * 60 * 1000) return cached.count;
   try {
-    // Solscan public API — completely free, no API key, returns real holder total
+    // Rugcheck API — free, no API key, returns totalHolders for most Solana tokens
     const res = await fetch(
-      `https://public-api.solscan.io/token/holders?tokenAddress=${mint}&limit=10&offset=0`,
-      { headers: { 'Accept': 'application/json' } }
+      `https://api.rugcheck.xyz/v1/tokens/${mint}/report`,
+      { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(6000) }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const count = typeof data?.total === 'number' ? data.total : null;
+    const count = typeof data?.totalHolders === 'number' && data.totalHolders > 0
+      ? data.totalHolders
+      : null;
     if (count != null) holderCache.set(mint, { count, ts: Date.now() });
     return count;
   } catch (e) {
@@ -424,21 +426,30 @@ async function fetchEnhancedTx(signature) {
   return Array.isArray(data) ? data[0] : null;
 }
 
-// Concurrency limiter — max 3 simultaneous Helius enhanced API calls.
+// Concurrency + rate limiter for Helius enhanced API calls.
+// Max 2 concurrent requests, min 250ms between each new request start (~4 req/sec).
 // Prevents 429 rate-limit errors when a burst of DEX transactions arrives.
 let _heliusConcurrent = 0;
 const _heliusWaiters = [];
-const HELIUS_MAX_CONCURRENT = 3;
+const HELIUS_MAX_CONCURRENT = 2;
+const HELIUS_MIN_INTERVAL_MS = 250;
+let _heliusLastStart = 0;
 
 function _drainHeliusQueue() {
-  while (_heliusConcurrent < HELIUS_MAX_CONCURRENT && _heliusWaiters.length > 0) {
-    const { sig, resolve, reject } = _heliusWaiters.shift();
-    _heliusConcurrent++;
-    fetchEnhancedTx(sig)
-      .then(resolve)
-      .catch(reject)
-      .finally(() => { _heliusConcurrent--; _drainHeliusQueue(); });
-  }
+  if (_heliusConcurrent >= HELIUS_MAX_CONCURRENT || _heliusWaiters.length === 0) return;
+  const now = Date.now();
+  const wait = Math.max(0, _heliusLastStart + HELIUS_MIN_INTERVAL_MS - now);
+  if (wait > 0) { setTimeout(_drainHeliusQueue, wait); return; }
+
+  const { sig, resolve, reject } = _heliusWaiters.shift();
+  _heliusConcurrent++;
+  _heliusLastStart = Date.now();
+  fetchEnhancedTx(sig)
+    .then(resolve)
+    .catch(reject)
+    .finally(() => { _heliusConcurrent--; _drainHeliusQueue(); });
+  // Try to immediately start a second slot if available
+  _drainHeliusQueue();
 }
 
 function fetchEnhancedTxQueued(signature) {
