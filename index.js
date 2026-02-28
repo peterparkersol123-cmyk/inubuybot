@@ -362,11 +362,10 @@ async function processTransaction(tx, storage) {
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
-// RPC endpoints tried in order on failure.
-// Helius node first (standard JSON-RPC — does NOT cost Enhanced API credits),
-// then free public fallbacks.
+// Free RPC endpoints for standard getTransaction / getSignaturesForAddress calls.
+// These do NOT use the Helius Enhanced API and cost zero credits.
+// Ankr and dRPC have much better rate limits than the public mainnet node.
 const FREE_RPCS = [
-  ...(HELIUS_API_KEY ? [`https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`] : []),
   'https://rpc.ankr.com/solana',
   'https://solana.drpc.org',
   'https://api.mainnet-beta.solana.com',
