@@ -190,27 +190,65 @@ const wsLastActivity = new Map();
 // ─── Holder Count (cached, 30-min TTL) ────────────────────────────────────────
 const holderCache = new Map(); // mint → { count, ts }
 
+// Count non-zero-balance token accounts on-chain via getProgramAccounts.
+// Uses dataSlice to fetch only the 8-byte amount field per account (very small payload).
+// Tries SPL Token first (165-byte accounts), then Token-2022 (variable size).
 async function getHolderCount(mint) {
-  // Cache for 30 minutes — holder count changes slowly
   const cached = holderCache.get(mint);
   if (cached && Date.now() - cached.ts < 30 * 60 * 1000) return cached.count;
-  try {
-    // Rugcheck API — free, no API key, returns totalHolders for most Solana tokens
-    const res = await fetch(
-      `https://api.rugcheck.xyz/v1/tokens/${mint}/report`,
-      { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(12000) }
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const count = typeof data?.totalHolders === 'number' && data.totalHolders > 0
-      ? data.totalHolders
-      : null;
-    if (count != null) holderCache.set(mint, { count, ts: Date.now() });
-    return count;
-  } catch (e) {
-    console.error('Holder count fetch failed:', e.message);
-    return null;
+
+  const attempts = [
+    // [programId, dataSize filter or null]
+    ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 165],  // standard SPL Token
+    ['TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', null], // Token-2022 (variable size)
+  ];
+
+  for (const [programId, dataSize] of attempts) {
+    for (const rpc of FREE_RPCS) {
+      try {
+        const filters = [{ memcmp: { offset: 0, bytes: mint } }];
+        if (dataSize) filters.push({ dataSize });
+
+        const res = await fetch(rpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 1,
+            method: 'getProgramAccounts',
+            params: [programId, {
+              encoding: 'base64',
+              dataSlice: { offset: 64, length: 8 }, // amount field only
+              filters,
+              commitment: 'confirmed',
+            }],
+          }),
+          signal: AbortSignal.timeout(20000),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        if (!Array.isArray(data.result) || data.result.length === 0) continue;
+
+        // Count accounts with non-zero balance
+        let count = 0;
+        for (const { account } of data.result) {
+          const raw = Buffer.from(account.data[0], 'base64');
+          const amount = raw.readBigUInt64LE(0);
+          if (amount > 0n) count++;
+        }
+
+        if (count > 0) {
+          holderCache.set(mint, { count, ts: Date.now() });
+          return count;
+        }
+      } catch (e) {
+        // try next RPC
+      }
+    }
   }
+
+  console.warn(`[HOLDERS] getProgramAccounts failed for ${mint.slice(0, 8)} — no count available`);
+  return null;
 }
 
 // ─── Market Cap (DexScreener, cached 5 min) ───────────────────────────────────
