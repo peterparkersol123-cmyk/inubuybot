@@ -1570,8 +1570,8 @@ bot.on('message', async (msg) => {
         userStates.delete(userId);
         const n = sub.settings.links.length;
         await tgRequest('sendMessage', { chat_id: dmChatId, text: `✅ Links saved! (${n} link${n !== 1 ? 's' : ''} set)` });
-        if (msgId) await refreshSettings(dmChatId, msgId, sub);
-        else await showSettings(dmChatId, sub);
+        await showSettings(dmChatId, sub);
+        if (msgId) { try { await tgRequest('editMessageReplyMarkup', { chat_id: dmChatId, message_id: msgId, reply_markup: { inline_keyboard: [] } }); } catch {} }
         return;
       }
       if (!text?.startsWith('http')) {
@@ -1625,8 +1625,8 @@ bot.on('message', async (msg) => {
           text: `✅ Link 3 saved as "<b>${label}</b>"! All links updated.`,
           parse_mode: 'HTML',
         });
-        if (msgId) await refreshSettings(dmChatId, msgId, sub);
-        else await showSettings(dmChatId, sub);
+        await showSettings(dmChatId, sub);
+        if (msgId) { try { await tgRequest('editMessageReplyMarkup', { chat_id: dmChatId, message_id: msgId, reply_markup: { inline_keyboard: [] } }); } catch {} }
       }
     }
     return;
@@ -1730,10 +1730,18 @@ bot.on('message', async (msg) => {
   saveSub(sub);
   userStates.delete(userId);
 
+  // Always send a fresh menu below the conversation so the user can see
+  // it immediately and continue editing — the old menu is now scrolled up.
+  await showSettings(dmChatId, sub);
+  // Strip buttons from the old menu message so stale buttons can't be clicked.
   if (msgId) {
-    await refreshSettings(dmChatId, msgId, sub);
-  } else {
-    await showSettings(dmChatId, sub);
+    try {
+      await tgRequest('editMessageReplyMarkup', {
+        chat_id: dmChatId,
+        message_id: msgId,
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch { /* ignore — old message may have been deleted */ }
   }
 });
 
