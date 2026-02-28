@@ -356,11 +356,161 @@ async function processTransaction(tx, storage) {
   }
 }
 
-// ─── Polling (replaces Helius webhook event billing) ──────────────────────────
-// Poll the Helius enhanced-transaction history API on a fixed schedule.
-// Cost: ~10 credits × 480 calls/day = 4 800 credits/day regardless of token activity.
-// For active tokens (>240 buys/day) this is cheaper than paying per webhook event.
-const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 min — fallback safety net for WS gaps
+// ─── Free Solana RPC — replaces Helius Enhanced Transaction API ───────────────
+// Uses standard getTransaction + getSignaturesForAddress (free, no API key).
+// Parses token balance diffs to extract buyer, SOL spent, and tokens received.
+
+const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
+// Free public RPC endpoints tried in order on failure
+const FREE_RPCS = [
+  'https://api.mainnet-beta.solana.com',
+];
+
+const DEX_SOURCE_NAMES = {
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4': 'JUPITER',
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8': 'RAYDIUM',
+  'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK': 'RAYDIUM',
+  'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc':  'ORCA',
+  '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P':  'PUMP_FUN',
+  'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA':  'PUMP_FUN',
+  'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo': 'METEORA',
+  'Eo7WjKq67rjJQDd1d1ck1DnpxjkK3jFHXKRkBVtiTEkF': 'METEORA',
+};
+
+async function fetchRawTx(signature) {
+  for (const rpc of FREE_RPCS) {
+    try {
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'getTransaction',
+          params: [signature, {
+            encoding: 'jsonParsed',
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          }],
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.result) return data.result;
+    } catch (e) {
+      console.warn(`[RPC] ${rpc.slice(0, 35)} failed: ${e.message}`);
+    }
+  }
+  return null;
+}
+
+async function fetchSigsForAddress(mint, limit = 20) {
+  for (const rpc of FREE_RPCS) {
+    try {
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'getSignaturesForAddress',
+          params: [mint, { limit, commitment: 'confirmed' }],
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (Array.isArray(data.result)) return data.result.map(s => s.signature);
+    } catch (e) {
+      console.warn(`[RPC] getSignaturesForAddress failed: ${e.message}`);
+    }
+  }
+  return [];
+}
+
+// Parse a raw jsonParsed transaction into the same shape processTransaction expects.
+// Returns null if the tx is not a buy swap for one of the monitored mints.
+function parseSwapFromRaw(rawTx, monitoredMints) {
+  if (!rawTx || rawTx.meta?.err) return null;
+
+  const { transaction, meta } = rawTx;
+  const accountKeys = (transaction.message.accountKeys || []).map(k =>
+    typeof k === 'string' ? k : k.pubkey
+  );
+  if (!accountKeys.length) return null;
+  const buyer = accountKeys[0]; // fee payer / signer is always first key
+
+  // Find a known DEX in all instructions + inner instructions
+  const allIxs = [
+    ...(transaction.message.instructions || []),
+    ...(meta.innerInstructions || []).flatMap(ii => ii.instructions || []),
+  ];
+  const programIds = allIxs.map(ix => ix.programId).filter(Boolean);
+  const dexId = programIds.find(id => DEX_PROGRAM_IDS.has(id));
+  if (!dexId) return null;
+
+  const preBals  = meta.preTokenBalances  || [];
+  const postBals = meta.postTokenBalances || [];
+  const preMap   = Object.fromEntries(preBals.map(b => [b.accountIndex, b]));
+
+  // Find which monitored mint the buyer received (positive token delta for buyer)
+  let tokenOut = null;
+  for (const mint of monitoredMints) {
+    const post = postBals.find(b => b.mint === mint && b.owner === buyer);
+    if (!post) continue;
+    const pre    = preMap[post.accountIndex];
+    const preAmt = BigInt(pre?.uiTokenAmount?.amount ?? '0');
+    const postAmt = BigInt(post.uiTokenAmount.amount);
+    if (postAmt > preAmt) {
+      tokenOut = {
+        mint,
+        rawTokenAmount: {
+          tokenAmount: (postAmt - preAmt).toString(),
+          decimals: post.uiTokenAmount.decimals,
+        },
+      };
+      break;
+    }
+  }
+  if (!tokenOut) return null; // sell, LP action, or unrelated tx
+
+  // SOL spent = fee payer balance decrease minus tx fee
+  const solLamports = Math.max(
+    0,
+    (meta.preBalances[0] ?? 0) - (meta.postBalances[0] ?? 0) - (meta.fee ?? 0)
+  );
+
+  // WSOL fallback — for WSOL→Token swaps the native SOL balance barely changes
+  let nativeInput = { amount: solLamports };
+  if (solLamports < 1000) {
+    const preWsol  = preBals.find(b => b.mint === WSOL_MINT && b.owner === buyer);
+    const postWsol = preWsol
+      ? postBals.find(b => b.accountIndex === preWsol.accountIndex)
+      : null;
+    if (preWsol && postWsol) {
+      const wsolDelta = Number(preWsol.uiTokenAmount.amount) - Number(postWsol.uiTokenAmount.amount);
+      if (wsolDelta > 0) nativeInput = { amount: wsolDelta };
+    }
+    if (nativeInput.amount < 1000) return null; // non-SOL buy (USDC etc.) — skip
+  }
+
+  return {
+    type: 'SWAP',
+    feePayer: buyer,
+    signature: transaction.signatures?.[0] ?? null,
+    source: DEX_SOURCE_NAMES[dexId] ?? 'UNKNOWN',
+    events: {
+      swap: {
+        nativeInput,
+        tokenOutputs: [tokenOut],
+        innerSwaps: [],
+      },
+    },
+  };
+}
+
+// ─── Polling — safety net for WS gaps ─────────────────────────────────────────
+const POLL_INTERVAL_MS = 3 * 60 * 1000; // 3 min
 
 async function pollForSwaps() {
   const storage = loadStorage();
@@ -369,21 +519,15 @@ async function pollForSwaps() {
 
   for (const mint of mints) {
     try {
-      const res = await fetch(
-        `https://api.helius.xyz/v0/addresses/${mint}/transactions` +
-        `?api-key=${HELIUS_API_KEY}&type=SWAP&limit=20`
-      );
-      if (!res.ok) { console.warn(`[POLL] ${res.status} for ${mint.slice(0, 8)}`); continue; }
-      const txs = await res.json();
-      if (!Array.isArray(txs)) continue;
-
+      const sigs = await fetchSigsForAddress(mint, 20);
       let newCount = 0;
-      for (const tx of txs) {
-        // Skip if already processed or currently being fetched by the WS handler
-        if (!tx.signature || seenSignatures.has(tx.signature) || pendingSigs.has(tx.signature)) continue;
-        markSeen(tx.signature);
+      for (const sig of sigs) {
+        if (!sig || seenSignatures.has(sig) || pendingSigs.has(sig)) continue;
+        markSeen(sig);
         newCount++;
-        await processTransaction(tx, storage);
+        const rawTx = await fetchRawTx(sig);
+        const tx = rawTx ? parseSwapFromRaw(rawTx, [mint]) : null;
+        if (tx) await processTransaction(tx, storage);
       }
       if (newCount > 0) console.log(`[POLL] ${mint.slice(0, 8)} +${newCount} new tx(s)`);
     } catch (e) {
@@ -393,13 +537,12 @@ async function pollForSwaps() {
 }
 
 // ─── Real-time WebSocket subscriptions ────────────────────────────────────────
-// For each monitored mint, open a logsSubscribe WebSocket to Helius's RPC.
-// On every confirmed log mentioning the mint we fetch the one enhanced tx
-// (~1-5 credits) and process it — real-time with no polling delay.
+// logsSubscribe fires on every transaction mentioning the mint.
+// DEX filter cuts ~90% of notifications. Remaining ones are parsed via free RPC.
 const WebSocket = require('ws');
 const wsConnections = new Map(); // mint → ws instance
 
-// Known DEX program IDs — we only call fetchEnhancedTx when one of these appears
+// Known DEX program IDs — we only call fetchRawTx when one of these appears
 // in the transaction logs. Skips transfers, ATA creations, etc. (~90% of notifications).
 const DEX_PROGRAM_IDS = new Set([
   'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter v6
@@ -412,59 +555,45 @@ const DEX_PROGRAM_IDS = new Set([
   'Eo7WjKq67rjJQDd1d1ck1DnpxjkK3jFHXKRkBVtiTEkF', // Meteora AMM
 ]);
 
-async function fetchEnhancedTx(signature) {
-  const res = await fetch(
-    `https://api.helius.xyz/v0/transactions/?api-key=${HELIUS_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transactions: [signature] }),
-    }
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data[0] : null;
-}
+// Rate limiter for free RPC getTransaction calls.
+// Max 2 concurrent, min 300ms between starts (~3 req/sec) — safe for public RPC.
+let _rpcConcurrent = 0;
+const _rpcWaiters = [];
+const RPC_MAX_CONCURRENT = 2;
+const RPC_MIN_INTERVAL_MS = 300;
+let _rpcLastStart = 0;
 
-// Concurrency + rate limiter for Helius enhanced API calls.
-// Max 2 concurrent requests, min 250ms between each new request start (~4 req/sec).
-// Prevents 429 rate-limit errors when a burst of DEX transactions arrives.
-let _heliusConcurrent = 0;
-const _heliusWaiters = [];
-const HELIUS_MAX_CONCURRENT = 2;
-const HELIUS_MIN_INTERVAL_MS = 250;
-let _heliusLastStart = 0;
-
-function _drainHeliusQueue() {
-  if (_heliusConcurrent >= HELIUS_MAX_CONCURRENT || _heliusWaiters.length === 0) return;
+function _drainRpcQueue() {
+  if (_rpcConcurrent >= RPC_MAX_CONCURRENT || _rpcWaiters.length === 0) return;
   const now = Date.now();
-  const wait = Math.max(0, _heliusLastStart + HELIUS_MIN_INTERVAL_MS - now);
-  if (wait > 0) { setTimeout(_drainHeliusQueue, wait); return; }
+  const wait = Math.max(0, _rpcLastStart + RPC_MIN_INTERVAL_MS - now);
+  if (wait > 0) { setTimeout(_drainRpcQueue, wait); return; }
 
-  const { sig, resolve, reject } = _heliusWaiters.shift();
-  _heliusConcurrent++;
-  _heliusLastStart = Date.now();
-  fetchEnhancedTx(sig)
+  const { sig, resolve, reject } = _rpcWaiters.shift();
+  _rpcConcurrent++;
+  _rpcLastStart = Date.now();
+  fetchRawTx(sig)
     .then(resolve)
     .catch(reject)
-    .finally(() => { _heliusConcurrent--; _drainHeliusQueue(); });
-  // Try to immediately start a second slot if available
-  _drainHeliusQueue();
+    .finally(() => { _rpcConcurrent--; _drainRpcQueue(); });
+  _drainRpcQueue();
 }
 
-function fetchEnhancedTxQueued(signature) {
+function fetchRawTxQueued(signature) {
   return new Promise((resolve, reject) => {
-    _heliusWaiters.push({ sig: signature, resolve, reject });
-    _drainHeliusQueue();
+    _rpcWaiters.push({ sig: signature, resolve, reject });
+    _drainRpcQueue();
   });
 }
 
 function startWsForMint(mint) {
   if (wsConnections.has(mint)) return;
 
-  const ws = new WebSocket(
-    `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
-  );
+  // Use Helius WS if key is set, fall back to public Solana mainnet-beta
+  const wsUrl = HELIUS_API_KEY
+    ? `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
+    : `wss://api.mainnet-beta.solana.com`;
+  const ws = new WebSocket(wsUrl);
   let pingTimer = null;
 
   ws.on('open', () => {
@@ -521,20 +650,20 @@ function startWsForMint(mint) {
       console.log(`[WS] New tx ${signature.slice(0, 12)} for ${mint.slice(0, 8)}`);
 
       try {
-        const tx = await fetchEnhancedTxQueued(signature);
+        const rawTx = await fetchRawTxQueued(signature);
+        const tx = rawTx ? parseSwapFromRaw(rawTx, [mint]) : null;
         if (tx) {
-          // Only mark seen AFTER a successful fetch so polling can retry on failure
           markSeen(signature);
           const storage = loadStorage();
           await processTransaction(tx, storage);
         } else {
-          // Helius returned empty array — tx not indexed yet or unknown; mark seen to prevent loops
+          // Not a buy swap (sell, LP action, non-SOL buy, or tx not yet indexed)
           markSeen(signature);
-          console.warn(`[WS] fetchEnhancedTx returned null for ${signature.slice(0, 12)} — skipping`);
+          console.log(`[WS] tx ${signature.slice(0, 12)} not a buy swap — skipping`);
         }
       } catch (e) {
-        // DO NOT markSeen on error — polling fallback will retry this tx via history API
-        console.error(`[WS] fetchEnhancedTx failed for ${signature.slice(0, 12)}:`, e.message, '— will retry via polling');
+        // DO NOT markSeen on error — polling fallback will retry
+        console.error(`[WS] fetchRawTx failed for ${signature.slice(0, 12)}:`, e.message, '— will retry via polling');
       } finally {
         pendingSigs.delete(signature);
       }
@@ -1691,14 +1820,8 @@ app.listen(PORT, async () => {
   const initMints = getUniqueMints(startupStorage);
   for (const mint of initMints) {
     try {
-      const res = await fetch(
-        `https://api.helius.xyz/v0/addresses/${mint}/transactions` +
-        `?api-key=${HELIUS_API_KEY}&type=SWAP&limit=10`
-      );
-      if (res.ok) {
-        const txs = await res.json();
-        if (Array.isArray(txs)) txs.forEach((t) => t.signature && seenSignatures.add(t.signature));
-      }
+      const sigs = await fetchSigsForAddress(mint, 10);
+      sigs.forEach(sig => sig && seenSignatures.add(sig));
     } catch (e) { /* non-fatal */ }
   }
   console.log(`[POLL] Seeded ${seenSignatures.size} recent signature(s)`);
@@ -1731,7 +1854,7 @@ app.listen(PORT, async () => {
     }
   }, 60_000);
 
-  // ── Polling fallback (catches anything the WS misses, e.g. failed fetchEnhancedTx)
+  // ── Polling fallback (catches anything the WS misses, e.g. failed fetchRawTx)
   setInterval(pollForSwaps, POLL_INTERVAL_MS);
   console.log(`[POLL] Fallback polling started — interval=${POLL_INTERVAL_MS / 1000}s`);
   setTimeout(pollForSwaps, 8000); // one initial poll after startup
