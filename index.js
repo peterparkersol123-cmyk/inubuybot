@@ -264,7 +264,7 @@ async function getMarketCap(mint) {
     if (!pairs || pairs.length === 0) return null;
     // Pick the pair with highest liquidity
     const best = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
-    const mcap = best?.fdv ?? best?.marketCap ?? null;
+    const mcap = best?.marketCap ?? best?.fdv ?? null;
     if (mcap != null) mcapCache.set(mint, { mcap, ts: Date.now() });
     return mcap;
   } catch (e) {
