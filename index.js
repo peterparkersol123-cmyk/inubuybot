@@ -397,6 +397,19 @@ async function pollForSwaps() {
 const WebSocket = require('ws');
 const wsConnections = new Map(); // mint → ws instance
 
+// Known DEX program IDs — we only call fetchEnhancedTx when one of these appears
+// in the transaction logs. Skips transfers, ATA creations, etc. (~90% of notifications).
+const DEX_PROGRAM_IDS = new Set([
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter v6
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM v4
+  'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK', // Raydium CLMM
+  'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',  // Orca Whirlpools
+  '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',  // pump.fun bonding curve
+  'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',  // pump.fun AMM (graduated tokens)
+  'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo', // Meteora DLMM
+  'Eo7WjKq67rjJQDd1d1ck1DnpxjkK3jFHXKRkBVtiTEkF', // Meteora AMM
+]);
+
 async function fetchEnhancedTx(signature) {
   const res = await fetch(
     `https://api.helius.xyz/v0/transactions/?api-key=${HELIUS_API_KEY}`,
@@ -409,6 +422,30 @@ async function fetchEnhancedTx(signature) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
   return Array.isArray(data) ? data[0] : null;
+}
+
+// Concurrency limiter — max 3 simultaneous Helius enhanced API calls.
+// Prevents 429 rate-limit errors when a burst of DEX transactions arrives.
+let _heliusConcurrent = 0;
+const _heliusWaiters = [];
+const HELIUS_MAX_CONCURRENT = 3;
+
+function _drainHeliusQueue() {
+  while (_heliusConcurrent < HELIUS_MAX_CONCURRENT && _heliusWaiters.length > 0) {
+    const { sig, resolve, reject } = _heliusWaiters.shift();
+    _heliusConcurrent++;
+    fetchEnhancedTx(sig)
+      .then(resolve)
+      .catch(reject)
+      .finally(() => { _heliusConcurrent--; _drainHeliusQueue(); });
+  }
+}
+
+function fetchEnhancedTxQueued(signature) {
+  return new Promise((resolve, reject) => {
+    _heliusWaiters.push({ sig: signature, resolve, reject });
+    _drainHeliusQueue();
+  });
 }
 
 function startWsForMint(mint) {
@@ -461,12 +498,19 @@ function startWsForMint(mint) {
       // Skip if already seen or already being fetched by a concurrent WS handler
       if (!signature || seenSignatures.has(signature) || pendingSigs.has(signature)) return;
 
+      // DEX filter — skip if no known DEX program was invoked.
+      // logsSubscribe fires for ALL transactions mentioning the mint (transfers,
+      // ATA creations, etc.). This filter cuts ~90% of unnecessary API calls.
+      const logs = value.logs || [];
+      const isDex = logs.some(l => DEX_PROGRAM_IDS.has(l.match(/^Program (\S+) invoke/)?.[1]));
+      if (!isDex) return;
+
       // Reserve the signature — polling will skip it while we're fetching
       pendingSigs.add(signature);
       console.log(`[WS] New tx ${signature.slice(0, 12)} for ${mint.slice(0, 8)}`);
 
       try {
-        const tx = await fetchEnhancedTx(signature);
+        const tx = await fetchEnhancedTxQueued(signature);
         if (tx) {
           // Only mark seen AFTER a successful fetch so polling can retry on failure
           markSeen(signature);
@@ -738,7 +782,7 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
   const chartUrl = `https://dexscreener.com/solana/${sub.tokenMint}`;
   const buyUrl   = `https://jup.ag/swap/SOL-${sub.tokenMint}`;
 
-  // Custom links row — use user-defined links if set, else fall back to Chart | Buy
+  // Links line at the bottom — custom links if set, else default Chart | Buy
   const customLinks = (s.links || []).filter(l => l?.url && l?.label);
   const linksStr = customLinks.length > 0
     ? customLinks.map(l => `<a href="${l.url}">${l.label}</a>`).join(' | ')
@@ -749,11 +793,12 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
     `${emojiRow}\n\n` +
     `${renderIcon(icons.spent)} Spent: <b>${formatUsd(usdValue)} (${solSpent.toFixed(3)} SOL)</b>\n` +
     `${renderIcon(icons.got)} Got: <b>${formatTokenAmount(tokenAmount)} ${name}</b>\n` +
-    `${renderIcon(icons.buyer)} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a> | ${linksStr}\n` +
+    `${renderIcon(icons.buyer)} <a href="https://solscan.io/account/${buyer}">Buyer</a> | <a href="https://solscan.io/tx/${tx.signature}">Txn</a>\n` +
     positionLine +
     priceLine +
     mcapLine +
-    holderLine
+    holderLine +
+    linksStr + '\n'
   );
 }
 
