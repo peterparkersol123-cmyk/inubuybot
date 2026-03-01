@@ -260,16 +260,27 @@ const mcapCache = new Map(); // mint → { mcap, ts }
 
 async function getMarketCap(mint) {
   const cached = mcapCache.get(mint);
-  if (cached && Date.now() - cached.ts < 15 * 60 * 1000) return cached.mcap;
+  if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.mcap;
   try {
     const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
     const data = await res.json();
-    const pairs = data?.pairs;
-    if (!pairs || pairs.length === 0) return null;
-    // Pick the pair with highest liquidity
+    const allPairs = data?.pairs;
+    if (!allPairs || allPairs.length === 0) return null;
+
+    // Only use pairs where our token is the BASE — the /tokens endpoint returns pairs
+    // where the mint can be either base or quote. If it's the quote, marketCap/fdv
+    // refers to the OTHER token's market cap, which would be completely wrong.
+    const pairs = allPairs.filter(
+      p => p.baseToken?.address?.toLowerCase() === mint.toLowerCase()
+    );
+    if (pairs.length === 0) return null;
+
+    // Pick the pair with highest liquidity for the most reliable price
     const best = pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
-    const mcap = best?.marketCap ?? best?.fdv ?? null;
-    if (mcap != null) mcapCache.set(mint, { mcap, ts: Date.now() });
+
+    // Use || not ?? so that a 0 value (bad data) correctly falls through to the next field
+    const mcap = best?.marketCap || best?.fdv || null;
+    if (mcap) mcapCache.set(mint, { mcap, ts: Date.now() });
     return mcap;
   } catch (e) {
     console.error('Market cap fetch failed:', e.message);
