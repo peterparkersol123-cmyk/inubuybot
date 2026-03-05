@@ -1053,7 +1053,7 @@ function buildAlertMessage(sub, tx, swap, tokenOut, holderCount, marketCap, prev
   let positionLine = '';
   if (usdValue > 0 && tokenAmount > 0) {
     if (!prevPosition) {
-      positionLine = `🆕 <b>New Position</b>\n`;
+      positionLine = `🆕 <b>New Buyer</b>\n`;
     } else {
       const avgBuyPrice  = prevPosition.totalSpentUsd / prevPosition.totalTokens;
       const currentPrice = usdValue / tokenAmount;
