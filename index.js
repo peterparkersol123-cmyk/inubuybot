@@ -178,6 +178,53 @@ function updatePosition(wallet, mint, usdSpent, tokensReceived) {
   }
 }
 
+// Scans recent on-chain history for a mint and seeds wallet positions from buys
+// that occurred before this process started. Runs fire-and-forget at startup.
+// Limited to the last 50 token transactions, fetching up to 15 raw txs.
+// Wallets that already have a persisted position are left untouched.
+async function seedPositionsFromHistory(mint) {
+  try {
+    const sigObjs = await fetchSigsForAddress(mint, 50);
+    const historical = sigObjs.filter(o => o.blockTime != null && o.blockTime < BOT_START_TIME);
+    if (historical.length === 0) return;
+
+    let seeded = 0;
+    for (const { signature } of historical.slice(0, 15)) {
+      try {
+        const rawTx = await fetchRawTx(signature);
+        const tx = rawTx ? parseSwapFromRaw(rawTx, [mint]) : null;
+        if (!tx) continue;
+
+        const buyer = tx.feePayer;
+        if (!buyer) continue;
+        const key = `${buyer}|${mint}`;
+        if (walletPositions.has(key)) continue; // don't overwrite existing data
+
+        const solSpent = tx.events.swap.nativeInput.amount / 1e9;
+        const usdSpent = solSpent * solPriceUsd;
+        const to = tx.events.swap.tokenOutputs[0];
+        const decimals = to?.rawTokenAmount?.decimals ?? 0;
+        const rawAmt   = to?.rawTokenAmount?.tokenAmount ?? '0';
+        const tokenAmt = Number(rawAmt) / Math.pow(10, decimals);
+
+        if (usdSpent > 0 && tokenAmt > 0) {
+          walletPositions.set(key, { totalSpentUsd: usdSpent, totalTokens: tokenAmt });
+          seeded++;
+        }
+      } catch (e) { /* skip individual tx failures */ }
+    }
+
+    if (seeded > 0) {
+      const storage = loadStorage();
+      storage.walletPositions = Object.fromEntries(walletPositions);
+      saveStorage(storage);
+      console.log(`[POSITIONS] Seeded ${seeded} historical position(s) for ${mint.slice(0, 8)}`);
+    }
+  } catch (e) {
+    console.warn(`[POSITIONS] History seed failed for ${mint.slice(0, 8)}:`, e.message);
+  }
+}
+
 // Unix timestamp (seconds) of when this process started.
 // Any transaction confirmed before this moment is ignored — we only alert on new buys.
 const BOT_START_TIME = Math.floor(Date.now() / 1000);
@@ -1932,15 +1979,22 @@ app.listen(PORT, async () => {
     }
   }
 
-  // ── Seed seen-signatures so we don't re-alert on old txs after restart ───
+  // ── Seed seen-signatures + historical wallet positions ────────────────────
   const initMints = getUniqueMints(startupStorage);
   for (const mint of initMints) {
     try {
-      const sigs = await fetchSigsForAddress(mint, 50); // 50 covers ~15 min of typical activity
+      const sigs = await fetchSigsForAddress(mint, 50);
       sigs.forEach(o => o?.signature && seenSignatures.add(o.signature));
     } catch (e) { /* non-fatal */ }
   }
   console.log(`[POLL] Seeded ${seenSignatures.size} recent signature(s)`);
+
+  // Build initial wallet positions from pre-startup on-chain history.
+  // Runs in the background so it doesn't delay the bot coming online.
+  // Uses the same 50 signatures already fetched above.
+  for (const mint of initMints) {
+    seedPositionsFromHistory(mint); // fire-and-forget
+  }
 
   // ── Start real-time WebSocket subscriptions ───────────────────────────────
   syncWsSubscriptions();
