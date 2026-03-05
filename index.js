@@ -148,8 +148,9 @@ function formatTokenAmount(amount) {
   return amount.toLocaleString();
 }
 
-// ─── Wallet Position Tracking (in-memory) ─────────────────────────────────────
-// Tracks each wallet's average buy price per token to show PnL on repeat buys
+// ─── Wallet Position Tracking ─────────────────────────────────────────────────
+// Tracks each wallet's average buy price per token to show PnL on repeat buys.
+// Persisted to the storage JSON so positions survive bot restarts/redeploys.
 // key: "${walletAddress}|${tokenMint}" → { totalSpentUsd, totalTokens }
 const walletPositions = new Map();
 
@@ -166,6 +167,14 @@ function updatePosition(wallet, mint, usdSpent, tokensReceived) {
     existing.totalTokens    += tokensReceived;
   } else {
     walletPositions.set(key, { totalSpentUsd: usdSpent, totalTokens: tokensReceived });
+  }
+  // Persist so positions survive restarts
+  try {
+    const storage = loadStorage();
+    storage.walletPositions = Object.fromEntries(walletPositions);
+    saveStorage(storage);
+  } catch (e) {
+    console.error('[POSITIONS] Save failed:', e.message);
   }
 }
 
@@ -1129,9 +1138,9 @@ async function sendBuyAlert(sub, tx, swap, tokenOut) {
 
   // Update position AFTER building message
   if (buyer && usdValue > 0) {
-    const decimals   = swap.tokenOutputs?.find(t => t.mint === sub.tokenMint)?.rawTokenAmount?.decimals ?? 0;
-    const rawAmount  = swap.tokenOutputs?.find(t => t.mint === sub.tokenMint)?.rawTokenAmount?.tokenAmount ?? '0';
-    const tokenAmt   = Number(rawAmount) / Math.pow(10, decimals);
+    const decimals = tokenOut.rawTokenAmount?.decimals ?? 0;
+    const rawAmount = tokenOut.rawTokenAmount?.tokenAmount ?? '0';
+    const tokenAmt  = Number(rawAmount) / Math.pow(10, decimals);
     updatePosition(buyer, sub.tokenMint, usdValue, tokenAmt);
   }
 
@@ -1881,6 +1890,13 @@ app.listen(PORT, async () => {
   for (const s of startupStorage.subscriptions) {
     console.log(`  ↳ chat=${s.chatId} mint=${s.tokenMint} active=${s.settings.active} name=${s.settings.tokenName}`);
   }
+
+  // Restore persisted wallet positions so PnL works across restarts
+  const savedPositions = startupStorage.walletPositions || {};
+  for (const [key, val] of Object.entries(savedPositions)) {
+    walletPositions.set(key, val);
+  }
+  if (walletPositions.size > 0) console.log(`[POSITIONS] Restored ${walletPositions.size} wallet position(s)`);
 
   // Get bot username (needed for deep links in /add)
   try {
