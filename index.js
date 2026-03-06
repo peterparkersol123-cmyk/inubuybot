@@ -1229,6 +1229,9 @@ const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
 // /start — regular help or deep-link setup from group
 bot.onText(/\/start(?:\s+(.+))?/, async (msg, match) => {
+  const tag = msg.text?.match(/^\/start@(\w+)/i)?.[1]?.toLowerCase();
+  if (tag && tag !== botUsername?.toLowerCase()) return;
+
   const userId = String(msg.from.id);
   const dmChatId = String(msg.chat.id);
   const param = match?.[1]?.trim();
@@ -1334,6 +1337,8 @@ bot.onText(/\/settings/, async (msg) => {
 
 // /cancel — abort any active input state
 bot.onText(/\/cancel/, async (msg) => {
+  const tag = msg.text?.match(/^\/cancel@(\w+)/i)?.[1]?.toLowerCase();
+  if (tag && tag !== botUsername?.toLowerCase()) return;
   if (msg.chat.type !== 'private') return;
   userStates.delete(String(msg.from.id));
   await tgRequest('sendMessage', { chat_id: String(msg.chat.id), text: '❌ Cancelled.' });
@@ -1341,6 +1346,8 @@ bot.onText(/\/cancel/, async (msg) => {
 
 // /status — show system status (DM only)
 bot.onText(/\/status/, async (msg) => {
+  const tag = msg.text?.match(/^\/status@(\w+)/i)?.[1]?.toLowerCase();
+  if (tag && tag !== botUsername?.toLowerCase()) return;
   if (msg.chat.type !== 'private') return;
   const chatId = String(msg.chat.id);
   const storage = loadStorage();
