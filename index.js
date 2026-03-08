@@ -182,11 +182,15 @@ function updatePosition(wallet, mint, usdSpent, tokensReceived) {
 // that occurred before this process started. Runs fire-and-forget at startup.
 // Limited to the last 50 token transactions, fetching up to 15 raw txs.
 // Wallets that already have a persisted position are left untouched.
+// All historical buys per wallet are accumulated so the avg price is correct.
 async function seedPositionsFromHistory(mint) {
   try {
     const sigObjs = await fetchSigsForAddress(mint, 50);
     const historical = sigObjs.filter(o => o.blockTime != null && o.blockTime < BOT_START_TIME);
     if (historical.length === 0) return;
+
+    // Snapshot which wallets already have persisted data — don't touch those.
+    const alreadyTracked = new Set(walletPositions.keys());
 
     let seeded = 0;
     for (const { signature } of historical.slice(0, 15)) {
@@ -198,7 +202,7 @@ async function seedPositionsFromHistory(mint) {
         const buyer = tx.feePayer;
         if (!buyer) continue;
         const key = `${buyer}|${mint}`;
-        if (walletPositions.has(key)) continue; // don't overwrite existing data
+        if (alreadyTracked.has(key)) continue; // leave persisted data alone
 
         const solSpent = tx.events.swap.nativeInput.amount / 1e9;
         const usdSpent = solSpent * solPriceUsd;
@@ -208,8 +212,15 @@ async function seedPositionsFromHistory(mint) {
         const tokenAmt = Number(rawAmt) / Math.pow(10, decimals);
 
         if (usdSpent > 0 && tokenAmt > 0) {
-          walletPositions.set(key, { totalSpentUsd: usdSpent, totalTokens: tokenAmt });
-          seeded++;
+          // Accumulate — a wallet may appear multiple times in history
+          const existing = walletPositions.get(key);
+          if (existing) {
+            existing.totalSpentUsd += usdSpent;
+            existing.totalTokens   += tokenAmt;
+          } else {
+            walletPositions.set(key, { totalSpentUsd: usdSpent, totalTokens: tokenAmt });
+            seeded++;
+          }
         }
       } catch (e) { /* skip individual tx failures */ }
     }
